@@ -1,19 +1,76 @@
-// Goat Cam - app.js
-// Stable rollback build: keeps layout untouched (NO fullscreen CSS / no DOM moving).
-// Improvements:
-// - No flicker: only paints ✅/❌ + goat/ban/earliest once we LOCK a stable match.
-// - Less guessing: exact match first; fuzzy only if strong.
-// - Auto scanning starts after camera; Scan button clears lock for next card.
+// Goat Cam - app.js (RECOVERY BUILD)
+// Goal: If you are seeing a full black screen with NO UI/debug, this build
+// 1) Forces a visible on-screen banner immediately (before any camera logic)
+// 2) Unregisters any service worker + clears caches (common cause: stuck old broken JS)
+// 3) Disables the template overlay mask entirely until you explicitly re-enable later
+// 4) Adds global error handlers to show an alert even if the page is black
 
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", async () => {
-    try { await navigator.serviceWorker.register("./sw.js", { scope: "./" }); } catch {}
-  });
-}
+// --- GLOBAL PANIC ERROR HANDLERS ---
+window.addEventListener("error", (e) => {
+  try { alert("JS error: " + (e?.message || e)); } catch {}
+});
+window.addEventListener("unhandledrejection", (e) => {
+  try { alert("Promise error: " + (e?.reason?.message || e?.reason || e)); } catch {}
+});
+
+// --- FORCE A VISIBLE BANNER IMMEDIATELY ---
+(function ensureRecoveryBanner(){
+  try {
+    // Make page not-black even if CSS is weird
+    document.documentElement.style.background = "#fff";
+    document.body.style.background = "#fff";
+    document.body.style.color = "#000";
+
+    const banner = document.createElement("div");
+    banner.id = "recoveryBanner";
+    banner.style.position = "fixed";
+    banner.style.left = "8px";
+    banner.style.top = "8px";
+    banner.style.zIndex = "2147483647";
+    banner.style.padding = "10px 12px";
+    banner.style.borderRadius = "14px";
+    banner.style.background = "rgba(255,255,255,0.92)";
+    banner.style.border = "1px solid rgba(0,0,0,0.15)";
+    banner.style.boxShadow = "0 6px 20px rgba(0,0,0,0.15)";
+    banner.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
+    banner.style.fontSize = "14px";
+    banner.style.lineHeight = "1.2";
+    banner.textContent = "RECOVERY BUILD LOADED ✅ (tap)";
+    banner.addEventListener("click", () => {
+      try { alert("Recovery banner is active. If the rest is black, it's likely cached old files / SW / CSS overlay."); } catch {}
+    });
+
+    // Append as early as possible
+    document.addEventListener("DOMContentLoaded", () => {
+      try { document.body.appendChild(banner); } catch {}
+    });
+    // Also append immediately if body already exists
+    if (document.body) document.body.appendChild(banner);
+  } catch {}
+})();
+
+// --- NUKE SERVICE WORKER + CACHES (very common cause of "still black") ---
+(async function nukeSWAndCaches(){
+  try {
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      for (const r of regs) await r.unregister();
+    }
+  } catch {}
+  try {
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      for (const k of keys) await caches.delete(k);
+    }
+  } catch {}
+})();
+
+// ----------------- ORIGINAL APP STARTS HERE -----------------
+// (This build disables the template overlay canvas entirely to avoid screen-dimming bugs.)
 
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d", { willReadFrequently: true });
+const ctx = canvas ? canvas.getContext("2d", { willReadFrequently: true }) : null;
 
 const startBtn = document.getElementById("startBtn");
 const toggleScanBtn = document.getElementById("toggleScanBtn");
@@ -27,135 +84,24 @@ const earliestEl = document.getElementById("earliest");
 const ocrTextEl = document.getElementById("ocrText");
 const debugEl = document.getElementById("debug");
 
-
-let floatingDebugEl = null;
-function ensureFloatingDebug() {
-  if (floatingDebugEl) return;
-  floatingDebugEl = document.createElement("div");
-  floatingDebugEl.id = "floatingDebug";
-  floatingDebugEl.style.position = "fixed";
-  floatingDebugEl.style.left = "8px";
-  floatingDebugEl.style.top = "8px";
-  floatingDebugEl.style.zIndex = "2147483647";
-  floatingDebugEl.style.maxWidth = "92vw";
-  floatingDebugEl.style.padding = "8px 10px";
-  floatingDebugEl.style.borderRadius = "12px";
-  floatingDebugEl.style.background = "rgba(0,0,0,0.55)";
-  floatingDebugEl.style.color = "#fff";
-  floatingDebugEl.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
-  floatingDebugEl.style.fontSize = "14px";
-  floatingDebugEl.style.lineHeight = "1.2";
-  floatingDebugEl.style.pointerEvents = "auto";
-  floatingDebugEl.style.userSelect = "none";
-  floatingDebugEl.textContent = "Goat Cam ready.";
-  // Tap this box to toggle template overlay on/off (panic switch)
-  floatingDebugEl.addEventListener("click", () => {
-    try {
-      if (guideCanvas) {
-        const isHidden = guideCanvas.style.display === "none";
-        guideCanvas.style.display = isHidden ? "block" : "none";
-        floatingDebugEl.textContent = isHidden ? "Template ON" : "Template OFF";
-      }
-    } catch {}
-  });
-  document.body.appendChild(floatingDebugEl);
-}
-
 function dbg(msg) {
-  if (debugEl) debugEl.textContent = msg || "";
-  try { ensureFloatingDebug(); if (floatingDebugEl) floatingDebugEl.textContent = msg || ""; } catch {}
-}
-
-
-
-function scrollTopAfterCamera() {
+  try { if (debugEl) debugEl.textContent = msg || ""; } catch {}
   try {
-    // After hiding header, jump to top so template is fully visible.
-    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
-  } catch (e) {
-    try { window.scrollTo(0, 0); } catch {}
-  }
-}
-
-function focusCameraView() {
-  // After you tap Start Camera, Safari often keeps you scrolled near the buttons.
-  // This scrolls the video/template area into view automatically.
-  try {
-    const target = video || document.getElementById("video");
-    if (!target) return;
-    target.scrollIntoView({ behavior: "instant", block: "start" });
-    // Tiny nudge because iOS Safari sometimes ignores the first scrollIntoView right after permission.
-    setTimeout(() => {
-      try { target.scrollIntoView({ behavior: "instant", block: "start" }); } catch {}
-    }, 120);
-  } catch (e) {
-    try { window.scrollTo(0, 0); } catch {}
-  }
-}
-
-
-function hideGoatCamHeader() {
-  // Remove the top black bar / title that says "Goat Cam" to reclaim vertical space.
-  try {
-    const needles = ["goat cam"];
-    const all = Array.from(document.querySelectorAll("header,h1,h2,div,span,section"));
-    for (const el of all) {
-      const t = (el.textContent || "").trim().toLowerCase();
-      if (!t) continue;
-      if (needles.some(n => t === n || t.startsWith(n))) {
-        el.style.display = "none";
-        // Hide a likely containing bar if it's tall
-        const p = el.parentElement;
-        if (p) {
-          const ph = p.getBoundingClientRect().height;
-          if (ph >= 40) p.style.display = "none";
-        }
-      }
-    }
-  } catch (e) {}
-}
-
-function tightenSpacingForSmallScreens() {
-  try { hideGoatCamHeader(); } catch (e) {}
-  // Light-touch spacing tweaks (no layout restructure) to reduce needed scrolling on iPhone.
-  try {
-    const isSmall = Math.min(window.innerWidth, window.innerHeight) <= 430;
-    if (!isSmall) return;
-
-    // Hide/compact header in camera mode
-    const headers = Array.from(document.querySelectorAll("h1,h2"));
-    for (const h of headers) {
-      if ((h.textContent || "").toLowerCase().includes("goat cam")) {
-        h.style.display = "none";
-      }
-    }
-
-    // Reduce vertical padding/margins on common wrappers
-    const candidates = Array.from(document.querySelectorAll("header, .header, .container, main"));
-    for (const el of candidates) {
-      const cs = getComputedStyle(el);
-      // Only adjust if it has lots of top padding/margin
-      if (parseFloat(cs.paddingTop) > 10) el.style.paddingTop = "6px";
-      if (parseFloat(cs.paddingBottom) > 10) el.style.paddingBottom = "6px";
-      if (parseFloat(cs.marginTop) > 10) el.style.marginTop = "6px";
-      if (parseFloat(cs.marginBottom) > 10) el.style.marginBottom = "6px";
-    }
-
-    // Slightly shrink the button row spacing (without moving them)
-    const btns = [startBtn, toggleScanBtn].filter(Boolean);
-    for (const b of btns) {
-      b.style.paddingTop = "10px";
-      b.style.paddingBottom = "10px";
-    }
-  } catch (e) {}
+    const b = document.getElementById("recoveryBanner");
+    if (b && msg) b.textContent = msg;
+  } catch {}
 }
 
 function setOverlay(state, markText) {
-  bigMark.classList.remove("ok", "no", "unknown");
-  bigMark.classList.add(state);
-  bigMark.textContent = markText;
+  try {
+    bigMark?.classList?.remove("ok", "no", "unknown");
+    bigMark?.classList?.add(state);
+    bigMark.textContent = markText;
+  } catch {}
 }
+
 function setBanBadge(status) {
+  if (!banStatusEl) return;
   banStatusEl.classList.remove("ok", "warn", "bad");
   if (!status || status === "—") { banStatusEl.textContent = "—"; return; }
   if (status === "BANNED") { banStatusEl.classList.add("bad"); banStatusEl.textContent = "🚫 BANNED"; return; }
@@ -164,24 +110,34 @@ function setBanBadge(status) {
   banStatusEl.classList.add("ok");
   banStatusEl.textContent = "✓ OK";
 }
+
 function resetUI(reason) {
   setOverlay("unknown", "…");
-  cardNameEl.textContent = "Not sure";
-  goatPoolEl.textContent = "—";
-  earliestEl.textContent = "—";
+  if (cardNameEl) cardNameEl.textContent = "Not sure";
+  if (goatPoolEl) goatPoolEl.textContent = "—";
+  if (earliestEl) earliestEl.textContent = "—";
   setBanBadge("—");
-  if (reason) dbg(reason);
+  if (ocrTextEl) ocrTextEl.textContent = "";
+  dbg(reason || "Ready.");
 }
 
 async function loadJSON(path) {
-  const r = await fetch(path);
+  const r = await fetch(path, { cache: "no-store" });
   if (!r.ok) throw new Error(`Failed to load ${path}`);
   return await r.json();
 }
 
+let scanning = false;
+let scanTimer = null;
+let scanBusy = false;
+
 let setsRelease = {};
 let goatBanlist = {};
 let goatPoolCfg = null;
+
+let locked = null;
+let lastCandidate = null;
+let ocrBuffer = [];
 
 function dateStrToNum(d) {
   if (!d) return null;
@@ -190,7 +146,6 @@ function dateStrToNum(d) {
   return y * 10000 + m * 100 + day;
 }
 
-// ---------- YGOPRO ----------
 async function ygoproLookupExactName(name) {
   const url = `https://db.ygoprodeck.com/api/v7/cardinfo.php?name=${encodeURIComponent(name)}`;
   const r = await fetch(url);
@@ -208,8 +163,7 @@ async function ygoproLookupFuzzyName(fragment) {
 function levenshtein(a, b) {
   a = a.toLowerCase(); b = b.toLowerCase();
   const m = a.length, n = b.length;
-  if (!m) return n;
-  if (!n) return m;
+  if (!m) return n; if (!n) return m;
   const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
   for (let i = 0; i <= m; i++) dp[i][0] = i;
   for (let j = 0; j <= n; j++) dp[0][j] = j;
@@ -220,40 +174,34 @@ function levenshtein(a, b) {
   return dp[m][n];
 }
 function similarityScore(ocr, name) {
-  const A = (ocr || "").toLowerCase();
-  const B = (name || "").toLowerCase();
-  const dist = levenshtein(A, B);
-  const denom = Math.max(8, Math.max(A.length, B.length));
-  return dist / denom; // lower better
+  const dist = levenshtein(ocr || "", name || "");
+  const denom = Math.max(8, Math.max((ocr || "").length, (name || "").length));
+  return dist / denom;
 }
 function pickSearchFragment(ocrText) {
   const cleaned = (ocrText || "").toLowerCase().replace(/[^a-z0-9'\- ]/g, " ").replace(/\s+/g, " ").trim();
-  const stop = new Set(["the", "of", "and", "a", "an"]);
-  const words = cleaned.split(" ").filter(w => w.length >= 4 && !stop.has(w));
-  if (words.length) { words.sort((a, b) => b.length - a.length); return words[0]; }
-  return cleaned.slice(0, 10) || cleaned;
+  const words = cleaned.split(" ").filter(w => w.length >= 4);
+  words.sort((a, b) => b.length - a.length);
+  return words[0] || cleaned.slice(0, 10) || cleaned;
 }
+
 async function resolveCardFromOCR(ocrText) {
   const exact = await ygoproLookupExactName(ocrText);
-  if (exact) return { card: exact, method: "exact", score: 0.0, exact: true };
+  if (exact) return { card: exact, exact: true, score: 0, method: "exact" };
 
-  const fragment = pickSearchFragment(ocrText);
-  if (!fragment || fragment.length < 3) return { card: null, method: "none", score: 1.0, exact: false };
+  const frag = pickSearchFragment(ocrText);
+  if (!frag || frag.length < 3) return { card: null, exact: false, score: 1, method: "none" };
 
-  const candidates = await ygoproLookupFuzzyName(fragment);
-  if (!candidates.length) return { card: null, method: "fname-empty", score: 1.0, exact: false };
-
+  const candidates = await ygoproLookupFuzzyName(frag);
   let best = null;
-  for (const c of candidates.slice(0, 220)) {
+  for (const c of candidates.slice(0, 200)) {
     const score = similarityScore(ocrText, c.name);
-    if (!best || score < best.score) best = { score, card: c };
+    if (!best || score < best.score) best = { card: c, score };
   }
-  // strict to avoid guessing
-  if (best && best.score <= 0.38) return { card: best.card, method: `fname:${fragment}`, score: best.score, exact: false };
-  return { card: null, method: `fname:${fragment} no-good`, score: best ? best.score : 1.0, exact: false };
+  if (best && best.score <= 0.35) return { card: best.card, exact: false, score: best.score, method: "fuzzy" };
+  return { card: null, exact: false, score: best ? best.score : 1, method: "fuzzy-no" };
 }
 
-// ---------- Goat checks ----------
 function computeEarliestSet(card) {
   const sets = card?.card_sets || [];
   let best = null;
@@ -261,7 +209,7 @@ function computeEarliestSet(card) {
     const d = setsRelease[s.set_name];
     const dn = dateStrToNum(d);
     if (!dn) continue;
-    if (!best || dn < best.dn) best = { dn, date: d, set_name: s.set_name, set_code: s.set_code };
+    if (!best || dn < best.dn) best = { dn, date: d, set_name: s.set_name };
   }
   return best;
 }
@@ -273,118 +221,39 @@ function goatPoolCheck(earliest) {
   if (!cutoff || !dn) return { inPool: null };
   return { inPool: dn <= cutoff, cutoffDate };
 }
-function banStatus(cardId) { return goatBanlist[String(cardId)] || "OK"; }
+function banStatus(cardId) {
+  return goatBanlist[String(cardId)] || "OK";
+}
 
 function applyCardToUI(card, methodText, ocrText) {
-  cardNameEl.textContent = card?.name || "Not sure";
-  const earliest = card ? computeEarliestSet(card) : null;
-  const pool = earliest ? goatPoolCheck(earliest) : { inPool: null };
-  const b = card ? banStatus(card.id) : "—";
+  if (cardNameEl) cardNameEl.textContent = card?.name || "Not sure";
+  const earliest = computeEarliestSet(card);
+  const pool = goatPoolCheck(earliest);
+  const b = banStatus(card.id);
 
   if (pool.inPool === true) setOverlay("ok", "✅");
   else if (pool.inPool === false) setOverlay("no", "❌");
   else setOverlay("unknown", "…");
 
-  goatPoolEl.textContent = pool.inPool == null ? "— Unknown"
-    : (pool.inPool ? "✅ Included (Goat era)" : "❌ Out of Goat era");
+  if (goatPoolEl) goatPoolEl.textContent =
+    pool.inPool == null ? "— Unknown" : (pool.inPool ? "✅ Included (Goat era)" : "❌ Out of Goat era");
 
   setBanBadge(b);
-  earliestEl.textContent = earliest ? `${earliest.set_name} (${earliest.date})` : "Unknown";
+  if (earliestEl) earliestEl.textContent = earliest ? `${earliest.set_name} (${earliest.date})` : "Unknown";
   if (ocrTextEl) ocrTextEl.textContent = ocrText || "";
-  if (methodText) dbg(methodText);
+  dbg(methodText || "");
 }
 
-// ---------- OCR cleanup ----------
-function basicNormalize(t) {
+function cleanOCR(t) {
   return (t || "").replace(/\n/g, " ").replace(/[^\w'\-: ]/g, " ").replace(/\s+/g, " ").trim();
 }
-function stripJunkPrefixes(t) {
-  let s = (t || "").trim();
-  s = s.replace(/^(?:I{1,3}|IV|V|VI{0,3}|1|l|L)\s+/i, "");
-  s = s.replace(/^[\-\:\;\'\"\.,]+/, "").trim();
-  s = s.replace(/[:;,.\-]+$/, "").trim();
-  return s;
-}
-function cleanFromWords(words) {
-  const good = [];
-  for (const w of (words || [])) {
-    const txt = (w.text || "").trim();
-    const conf = Number.isFinite(w.confidence) ? w.confidence : 0;
-    if (/[A-Za-z]/.test(txt) && txt.length >= 2 && conf >= 50) good.push(txt);
-  }
-  return stripJunkPrefixes(basicNormalize(good.join(" ")));
-}
-function cleanOCR(rawText, words) {
-  const byWords = cleanFromWords(words);
-  let s = (byWords && byWords.length >= 5) ? byWords : stripJunkPrefixes(basicNormalize(rawText || ""));
-  if (s.includes(":")) {
-    const left = s.split(":")[0].trim();
-    if (left.length >= 5) s = left;
-  }
-  s = s.replace(/\bFLEMENTAL\b/gi, "ELEMENTAL");
-  return stripJunkPrefixes(s).trim();
-}
-function looksTooPartial(cleaned) {
-  if (!cleaned) return true;
-  if (!/[A-Za-z]/.test(cleaned)) return true;
-  const words = cleaned.split(/\s+/).filter(Boolean);
-  if (words.length < 2) return true;
-  if (cleaned.length < 7) return true;
-  return !words.some(w => w.length >= 4);
+function looksTooPartial(t) {
+  if (!t) return true;
+  if (!/[A-Za-z]/.test(t)) return true;
+  const words = t.split(/\s+/).filter(Boolean);
+  return words.length < 2 || t.length < 7;
 }
 
-// ---------- Preprocess ----------
-function preprocessBW(srcCanvas) {
-  const w = srcCanvas.width, h = srcCanvas.height;
-  const scale = 2.6;
-  const out = document.createElement("canvas");
-  out.width = Math.max(1, Math.round(w * scale));
-  out.height = Math.max(1, Math.round(h * scale));
-  const octx = out.getContext("2d");
-  octx.imageSmoothingEnabled = true;
-  octx.drawImage(srcCanvas, 0, 0, out.width, out.height);
-
-  const img = octx.getImageData(0, 0, out.width, out.height);
-  const d = img.data;
-  let sum = 0;
-  for (let i = 0; i < d.length; i += 4) sum += 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-  const mean = sum / (d.length / 4);
-  const threshold = Math.max(80, Math.min(180, mean * 0.90));
-
-  for (let i = 0; i < d.length; i += 4) {
-    let gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-    gray = (gray - 128) * 1.10 + 128;
-    const v = gray > threshold ? 255 : 0;
-    d[i] = d[i+1] = d[i+2] = v;
-    d[i+3] = 255;
-  }
-  octx.putImageData(img, 0, 0);
-  return out;
-}
-function preprocessGray(srcCanvas) {
-  const w = srcCanvas.width, h = srcCanvas.height;
-  const scale = 2.6;
-  const out = document.createElement("canvas");
-  out.width = Math.max(1, Math.round(w * scale));
-  out.height = Math.max(1, Math.round(h * scale));
-  const octx = out.getContext("2d");
-  octx.imageSmoothingEnabled = true;
-  octx.drawImage(srcCanvas, 0, 0, out.width, out.height);
-
-  const img = octx.getImageData(0, 0, out.width, out.height);
-  const d = img.data;
-  for (let i = 0; i < d.length; i += 4) {
-    let gray = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-    gray = (gray - 128) * 1.18 + 128;
-    gray = Math.max(0, Math.min(255, gray));
-    d[i] = d[i+1] = d[i+2] = gray;
-    d[i+3] = 255;
-  }
-  octx.putImageData(img, 0, 0);
-  return out;
-}
-
-// ---------- Tesseract ----------
 let workerPromise = null;
 async function getWorker() {
   if (!workerPromise) {
@@ -400,105 +269,11 @@ async function getWorker() {
   return workerPromise;
 }
 async function ocrWithWorker(canvasToRead) {
-  const w = await getWorker();
-  const { data } = await w.recognize(canvasToRead);
+  const worker = await getWorker();
+  const { data } = await worker.recognize(canvasToRead);
   return data;
 }
-function pickBetterOcr(a, b) {
-  const ca = cleanOCR(a?.text || "", a?.words || []);
-  const cb = cleanOCR(b?.text || "", b?.words || []);
-  const aBad = looksTooPartial(ca);
-  const bBad = looksTooPartial(cb);
-  if (aBad && !bBad) return { data: b, cleaned: cb };
-  if (!aBad && bBad) return { data: a, cleaned: ca };
-  if (cb.length > ca.length) return { data: b, cleaned: cb };
-  return { data: a, cleaned: ca };
-}
 
-// ---------- Template overlay ----------
-let guideCanvas = null;
-let guideCtx = null;
-const GUIDE = {
-  card: { x: 0.10, y: 0.14, w: 0.80, h: 0.74 },
-  name: { x: 0.13, y: 0.17, w: 0.74, h: 0.11 },
-  art:  { x: 0.13, y: 0.30, w: 0.74, h: 0.36 },
-  set:  { x: 0.13, y: 0.67, w: 0.74, h: 0.08 },
-  text: { x: 0.13, y: 0.76, w: 0.74, h: 0.12 }
-};
-const CROP = GUIDE.name;
-
-function ensureGuideOverlay() {
-  if (guideCanvas) return;
-  guideCanvas = document.createElement("canvas");
-  guideCanvas.style.position = "fixed";
-  guideCanvas.style.left = "0";
-  guideCanvas.style.top = "0";
-  guideCanvas.style.zIndex = "9999";
-  guideCanvas.style.pointerEvents = "none";
-  guideCanvas.style.display = "none";
-  document.body.appendChild(guideCanvas);
-  guideCtx = guideCanvas.getContext("2d");
-  window.addEventListener("resize", redrawGuide);
-  window.addEventListener("scroll", redrawGuide, true);
-  setInterval(() => { if (scanning && !locked) redrawGuide(); }, 200);
-}
-function roundRect(c, x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2);
-  c.beginPath();
-  c.moveTo(x + rr, y);
-  c.arcTo(x + w, y, x + w, y + h, rr);
-  c.arcTo(x + w, y + h, x, y + h, rr);
-  c.arcTo(x, y + h, x, y, rr);
-  c.arcTo(x, y, x + w, y, rr);
-  c.closePath();
-}
-function strokeBox(c, x, y, w, h, stroke, fill) {
-  if (fill) { c.fillStyle = fill; roundRect(c, x, y, w, h, 12); c.fill(); }
-  c.strokeStyle = stroke; c.lineWidth = 2; roundRect(c, x, y, w, h, 12); c.stroke();
-}
-function redrawGuide() {
-  if (!guideCanvas || !guideCtx) return;
-
-  guideCanvas.width = Math.max(1, window.innerWidth);
-  guideCanvas.height = Math.max(1, window.innerHeight);
-  guideCtx.clearRect(0, 0, guideCanvas.width, guideCanvas.height);
-
-  const r = video.getBoundingClientRect();
-  // If the video isn't laid out yet, do NOT draw the dark mask (prevents full black screen).
-  if (r.width < 20 || r.height < 20) {
-    guideCanvas.style.display = "none";
-    return;
-  }
-  guideCanvas.style.display = "block";
-
-  const abs = (b) => ({
-    x: r.left + r.width * b.x,
-    y: r.top + r.height * b.y,
-    w: r.width * b.w,
-    h: r.height * b.h
-  });
-
-  const card = abs(GUIDE.card);
-  const name = abs(GUIDE.name);
-  const art  = abs(GUIDE.art);
-  const set  = abs(GUIDE.set);
-  const text = abs(GUIDE.text);
-
-  // IMPORTANT: Only dim the VIDEO area, not the whole screen (so UI/debug remain visible).
-  guideCtx.fillStyle = "rgba(0,0,0,0.33)";
-  guideCtx.fillRect(r.left, r.top, r.width, r.height);
-
-  // Clear the card window inside the dimmed video area
-  guideCtx.clearRect(card.x, card.y, card.w, card.h);
-
-  strokeBox(guideCtx, card.x, card.y, card.w, card.h, "rgba(255,255,255,0.92)", null);
-  strokeBox(guideCtx, name.x, name.y, name.w, name.h, "rgba(0,255,170,0.98)", "rgba(0,255,170,0.10)");
-  strokeBox(guideCtx, art.x, art.y, art.w, art.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
-  strokeBox(guideCtx, set.x, set.y, set.w, set.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
-  strokeBox(guideCtx, text.x, text.y, text.w, text.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
-}
-
-// ---------- object-fit aware crop mapping ----------
 function getVisibleSourceRect() {
   const vw = video.videoWidth, vh = video.videoHeight;
   const r = video.getBoundingClientRect();
@@ -514,18 +289,18 @@ function getVisibleSourceRect() {
   const visibleH = dh / scale;
   const offsetX = (vw - visibleW) / 2;
   const offsetY = (vh - visibleH) / 2;
-
   return { offsetX, offsetY, visibleW, visibleH, vw, vh };
 }
-function grabNameStripCanvas(yOffsetFrac = 0) {
+
+const CROP = { x: 0.13, y: 0.17, w: 0.74, h: 0.11 };
+function grabNameStripCanvas() {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
   const vis = getVisibleSourceRect();
   if (!vis) return null;
 
-  const y = Math.min(0.95, Math.max(0.0, CROP.y + yOffsetFrac));
   let sx = Math.floor(vis.offsetX + vis.visibleW * CROP.x);
-  let sy = Math.floor(vis.offsetY + vis.visibleH * y);
+  let sy = Math.floor(vis.offsetY + vis.visibleH * CROP.y);
   let sw = Math.floor(vis.visibleW * CROP.w);
   let sh = Math.floor(vis.visibleH * CROP.h);
 
@@ -533,102 +308,89 @@ function grabNameStripCanvas(yOffsetFrac = 0) {
   sy = Math.max(0, Math.min(vh - 1, sy));
   sw = Math.max(1, Math.min(vw - sx, sw));
   sh = Math.max(1, Math.min(vh - sy, sh));
-  if (sw < 10 || sh < 10) return null;
 
-  const cropCanvas = document.createElement("canvas");
-  cropCanvas.width = sw;
-  cropCanvas.height = sh;
-  cropCanvas.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-  return cropCanvas;
+  const c = document.createElement("canvas");
+  c.width = sw; c.height = sh;
+  c.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+  return c;
 }
 
-// ---------- Scan loop + stable lock ----------
-let scanning = false;
-let scanTimer = null;
-let scanBusy = false;
-let locked = null;
-let lastCandidate = null;
+function preprocessBW(srcCanvas) {
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const scale = 2.4;
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(w * scale));
+  out.height = Math.max(1, Math.round(h * scale));
+  const o = out.getContext("2d");
+  o.imageSmoothingEnabled = true;
+  o.drawImage(srcCanvas, 0, 0, out.width, out.height);
+  const img = o.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
 
+  let sum = 0;
+  for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  const mean = sum / (d.length / 4);
+  const thr = Math.max(80, Math.min(180, mean * 0.90));
+
+  for (let i = 0; i < d.length; i += 4) {
+    const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    const v = gray > thr ? 255 : 0;
+    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+  o.putImageData(img, 0, 0);
+  return out;
+}
 
 function canLockCard(card) {
-  // Only lock if we can compute earliest set/date AND goat inclusion.
-  try {
-    const earliestCheck = computeEarliestSet(card);
-    const poolCheck = earliestCheck ? goatPoolCheck(earliestCheck) : { inPool: null };
-    if (!earliestCheck || !earliestCheck.date) return { ok: false, reason: "earliest-missing" };
-    if (poolCheck.inPool == null) return { ok: false, reason: "pool-unknown" };
-    return { ok: true, earliestCheck, poolCheck };
-  } catch (e) {
-    return { ok: false, reason: "exception" };
-  }
+  const earliest = computeEarliestSet(card);
+  const pool = goatPoolCheck(earliest);
+  return !!(earliest && earliest.date && pool.inPool != null);
 }
 
 function lockResult(card, method, ocrText) {
-  const chk = canLockCard(card);
-  if (!chk.ok) {
-    dbg("Matched name, but waiting for full info… hold steady");
+  if (!canLockCard(card)) {
+    dbg("Matched name, waiting for full info…");
     return;
   }
-  locked = { card, method, ocr: ocrText, permanent: true };
+  locked = { card, method, ocr: ocrText };
   applyCardToUI(card, `LOCKED (${method})`, ocrText);
-  scanning = false;
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
-}
-
-function updateCandidateStability(cardId, score) {
-  const now = Date.now();
-  if (!lastCandidate || lastCandidate.id !== cardId || now - lastCandidate.lastSeenAt > 2500) {
-    lastCandidate = { id: cardId, seenCount: 1, bestScore: score, lastSeenAt: now };
-  } else {
-    lastCandidate.seenCount += 1;
-    lastCandidate.bestScore = Math.min(lastCandidate.bestScore, score);
-    lastCandidate.lastSeenAt = now;
-  }
-  return lastCandidate;
+  scanning = false;
 }
 
 async function scanOnce() {
   if (scanBusy || locked) return;
   scanBusy = true;
   try {
-    const yOffsets = [0.00, 0.03, -0.03];
-    let bestPick = null;
+    const strip = grabNameStripCanvas();
+    if (!strip) { dbg("Camera not ready…"); return; }
 
-    for (const yo of yOffsets) {
-      const strip = grabNameStripCanvas(yo);
-      if (!strip) continue;
+    const bw = preprocessBW(strip);
+    const data = await ocrWithWorker(bw);
+    const cleaned = cleanOCR(data.text);
 
-      dbg("Reading name…");
-      setOverlay("unknown", "…");
-
-      const dataBW = await ocrWithWorker(preprocessBW(strip));
-      const dataG  = await ocrWithWorker(preprocessGray(strip));
-      const picked = pickBetterOcr(dataBW, dataG);
-
-      if (!bestPick || picked.cleaned.length > bestPick.cleaned.length) bestPick = picked;
-      if (bestPick && !looksTooPartial(bestPick.cleaned) && bestPick.cleaned.length >= 18) break;
-    }
-
-    if (!bestPick) { dbg("Camera not ready yet…"); return; }
-
-    const cleaned = bestPick.cleaned;
     if (ocrTextEl) ocrTextEl.textContent = cleaned || "";
-
-    if (looksTooPartial(cleaned)) { dbg("Too little title text — reduce glare + hold steady."); return; }
+    if (looksTooPartial(cleaned)) { dbg("Too little title text — reduce glare."); return; }
 
     const resolved = await resolveCardFromOCR(cleaned);
-    if (!resolved.card) { dbg("No confident match yet."); return; }
+    if (!resolved.card) { dbg("No match (confident)."); return; }
 
+    // Lock rules: exact locks immediately; fuzzy needs two consistent reads
     if (resolved.exact) { lockResult(resolved.card, "exact", cleaned); return; }
 
-    const st = updateCandidateStability(resolved.card.id, resolved.score ?? 1.0);
-    const stableEnough = (st.seenCount >= 2 && st.bestScore <= 0.34);
-    if (stableEnough) { lockResult(resolved.card, `fuzzy ${st.bestScore.toFixed(2)}`, cleaned); return; }
-
-    dbg("Matching… hold steady (waiting to lock)");
-  } catch (e) {
-    console.error(e);
-    dbg(`ERROR: ${e.message || e}`);
+    if (!lastCandidate || lastCandidate.id !== resolved.card.id) {
+      lastCandidate = { id: resolved.card.id, seen: 1, best: resolved.score };
+      dbg("Matching… hold steady");
+      return;
+    }
+    lastCandidate.seen += 1;
+    lastCandidate.best = Math.min(lastCandidate.best, resolved.score);
+    if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.33) {
+      lockResult(resolved.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, cleaned);
+      return;
+    }
+    dbg("Matching… hold steady");
   } finally {
     scanBusy = false;
   }
@@ -637,103 +399,35 @@ async function scanOnce() {
 function startAutoScanning() {
   if (scanning) return;
   scanning = true;
-  toggleScanBtn.textContent = "Scan New Card";
   const rate = parseInt(scanRateSel?.value, 10) || 900;
+  if (toggleScanBtn) toggleScanBtn.textContent = "Scan New Card";
   dbg("Auto-scanning… (locks when stable)");
   scanTimer = setInterval(scanOnce, rate);
   scanOnce();
 }
 
-// ---------- Camera ----------
 async function startCamera() {
-  ensureFloatingDebug();
   dbg("Requesting camera…");
-// iOS/Safari friendliness: ensure inline playback + muted (prevents weird black video cases)
   try {
     video.setAttribute("playsinline", "");
     video.setAttribute("webkit-playsinline", "");
     video.playsInline = true;
     video.muted = true;
     video.autoplay = true;
-  } catch (e) {}
+  } catch {}
 
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-      audio: false
-    });
-  } catch (e) {
-    dbg("Camera permission denied or unavailable.");
-    throw e;
-  }
-
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+    audio: false
+  });
   video.srcObject = stream;
-
-  // Wait for metadata, then attempt playback
   await new Promise(resolve => (video.onloadedmetadata = () => resolve()));
-
-  try {
-    await video.play();
-
-  // iOS can report layout/video size late; wait until we have dimensions before showing template.
-  const waitForVideoSize = async () => {
-    for (let i = 0; i < 15; i++) {
-      const ok = video.videoWidth > 0 && video.videoHeight > 0;
-      if (ok) return true;
-      await new Promise(r => setTimeout(r, 80));
-    }
-    return false;
-  };
-
-  const hasSize = await waitForVideoSize();
-  if (!hasSize) {
-    dbg("Camera started but video size is 0 (black). Try: Safari Private tab, then Start Camera again.");
-  }
-
-  // Show template only when video is laid out (prevents full-screen black mask situations)
-  ensureGuideOverlay();
-  if (hasSize) {
-    guideCanvas.style.display = "block";
-    redrawGuide();
-  } else {
-    guideCanvas.style.display = "none";
-  }
-
-  // Keep UI visible even if video is black: bring buttons into view
-  try { focusCameraView?.(); } catch {}
-
-} catch (e) {
-    // Some Safari builds need a second play attempt after a short delay
-    dbg("Starting video…");
-    await new Promise(r => setTimeout(r, 200));
-    await video.play();
-  }
-
-  ensureGuideOverlay();
-  redrawGuide();
-  try { tightenSpacingForSmallScreens?.(); } catch {}
-  try { ensureNoScrollIfPossible?.(); } catch {}
-  try { focusCameraView?.(); } catch {}
-
-  // Diagnostics (helps if we still get black)
-  setTimeout(() => {
-    try {
-      const w = video.videoWidth, h = video.videoHeight;
-      const rs = video.readyState;
-      const hasStream = !!video.srcObject;
-      const playing = !video.paused && !video.ended;
-      if (!hasStream) dbg("No stream attached (unexpected).");
-      else if (!playing) dbg("Video not playing — tap the screen once, then try Start Camera again.");
-      else if (!w || !h || rs < 2) dbg("Video feed not ready (black) — refresh or try Private tab.");
-      else dbg(`Camera OK (${w}x${h}). Scanning…`);
-    } catch {}
-  }, 250);
+  await video.play();
+  dbg(`Camera OK (${video.videoWidth}x${video.videoHeight}).`);
 }
 
-
-// ---------- Boot / controls ----------
-startBtn.addEventListener("click", async () => {
+// Controls
+startBtn?.addEventListener("click", async () => {
   startBtn.disabled = true;
   startBtn.textContent = "Loading…";
   try {
@@ -744,24 +438,21 @@ startBtn.addEventListener("click", async () => {
 
     await startCamera();
     startBtn.textContent = "Camera Ready";
-    try { focusCameraView(); } catch {}
-    resetUI("Line up card; name in green box. Hold steady.");
-    try { hideGoatCamHeader(); } catch {}
-    try { tightenSpacingForSmallScreens(); } catch {}
+    resetUI("Line up card title and hold steady.");
     startAutoScanning();
   } catch (e) {
     console.error(e);
-    alert("Failed to start camera. Check Safari camera permission and reload.");
     startBtn.disabled = false;
     startBtn.textContent = "Start Camera";
-    resetUI(e.message || String(e));
+    try { alert("Failed to start camera: " + (e?.message || e)); } catch {}
+    dbg("Failed to start camera.");
   }
 });
 
-toggleScanBtn.addEventListener("click", async () => {
-  // Always: clear lock + restart scanning for next card
+toggleScanBtn?.addEventListener("click", async () => {
   locked = null;
   lastCandidate = null;
+  ocrBuffer = [];
   resetUI("Scan new card…");
   if (!scanning) startAutoScanning();
   await scanOnce();
