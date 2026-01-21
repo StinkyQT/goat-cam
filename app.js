@@ -196,7 +196,7 @@ function beautifyControlsAndFit() {
     }
   } catch {}
 }
-document.addEventListener("DOMContentLoaded", () => { removeTopBars(); setTimeout(removeTopBars, 250); beautifyControlsAndFit(); });
+document.addEventListener("DOMContentLoaded", () => { removeTopBars(); setTimeout(removeTopBars, 250); try { beautifyControlsAndFit(); } catch (e) {} });
 // Data
 async function loadJSON(path) {
   const r = await fetch(path, { cache: "no-store" });
@@ -560,7 +560,7 @@ async function startCamera() {
     await video.play();
   }
   removeTopBars();
-  beautifyControlsAndFit();
+  try { beautifyControlsAndFit(); } catch (e) {}
   ensureGuideOverlay();
   redrawGuide();
   dbg(`Camera OK (${video.videoWidth}x${video.videoHeight}).`);
