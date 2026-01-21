@@ -29,6 +29,57 @@ const debugEl = document.getElementById("debug");
 
 function dbg(msg) { if (debugEl) debugEl.textContent = msg || ""; }
 
+
+function focusCameraView() {
+  // After you tap Start Camera, Safari often keeps you scrolled near the buttons.
+  // This scrolls the video/template area into view automatically.
+  try {
+    const target = video || document.getElementById("video");
+    if (!target) return;
+    target.scrollIntoView({ behavior: "instant", block: "start" });
+    // Tiny nudge because iOS Safari sometimes ignores the first scrollIntoView right after permission.
+    setTimeout(() => {
+      try { target.scrollIntoView({ behavior: "instant", block: "start" }); } catch {}
+    }, 120);
+  } catch (e) {
+    try { window.scrollTo(0, 0); } catch {}
+  }
+}
+
+function tightenSpacingForSmallScreens() {
+  // Light-touch spacing tweaks (no layout restructure) to reduce needed scrolling on iPhone.
+  try {
+    const isSmall = Math.min(window.innerWidth, window.innerHeight) <= 430;
+    if (!isSmall) return;
+
+    // Hide/compact header in camera mode
+    const headers = Array.from(document.querySelectorAll("h1,h2"));
+    for (const h of headers) {
+      if ((h.textContent || "").toLowerCase().includes("goat cam")) {
+        h.style.display = "none";
+      }
+    }
+
+    // Reduce vertical padding/margins on common wrappers
+    const candidates = Array.from(document.querySelectorAll("header, .header, .container, main"));
+    for (const el of candidates) {
+      const cs = getComputedStyle(el);
+      // Only adjust if it has lots of top padding/margin
+      if (parseFloat(cs.paddingTop) > 10) el.style.paddingTop = "6px";
+      if (parseFloat(cs.paddingBottom) > 10) el.style.paddingBottom = "6px";
+      if (parseFloat(cs.marginTop) > 10) el.style.marginTop = "6px";
+      if (parseFloat(cs.marginBottom) > 10) el.style.marginBottom = "6px";
+    }
+
+    // Slightly shrink the button row spacing (without moving them)
+    const btns = [startBtn, toggleScanBtn].filter(Boolean);
+    for (const b of btns) {
+      b.style.paddingTop = "10px";
+      b.style.paddingBottom = "10px";
+    }
+  } catch (e) {}
+}
+
 function setOverlay(state, markText) {
   bigMark.classList.remove("ok", "no", "unknown");
   bigMark.classList.add(state);
@@ -522,6 +573,7 @@ startBtn.addEventListener("click", async () => {
 
     await startCamera();
     startBtn.textContent = "Camera Ready";
+    try { focusCameraView(); } catch {}
     resetUI("Line up card; name in green box. Hold steady.");
     startAutoScanning();
   } catch (e) {
