@@ -27,7 +27,47 @@ const earliestEl = document.getElementById("earliest");
 const ocrTextEl = document.getElementById("ocrText");
 const debugEl = document.getElementById("debug");
 
-function dbg(msg) { if (debugEl) debugEl.textContent = msg || ""; }
+function dbg(msg) { if (debugEl) debugEl.textContent = msg || ""; 
+function compactUiForCamera() {
+  // Goal: avoid scrolling on iPhone by shrinking the big title/header area ONLY after camera is active.
+  try {
+    // Shrink any H1/H2 that contains "Goat Cam"
+    const headers = Array.from(document.querySelectorAll("h1,h2"));
+    for (const h of headers) {
+      if ((h.textContent || "").toLowerCase().includes("goat cam")) {
+        h.style.fontSize = "28px";
+        h.style.lineHeight = "1.05";
+        h.style.margin = "10px 0 6px 0";
+      }
+    }
+
+    // Reduce extra top padding/margins on body/main if present
+    document.body.style.marginTop = "0px";
+    document.body.style.paddingTop = "0px";
+
+    // If still overflowing, hide the title entirely (camera mode only)
+    const overflow = document.documentElement.scrollHeight - window.innerHeight;
+    if (overflow > 6) {
+      for (const h of headers) {
+        if ((h.textContent || "").toLowerCase().includes("goat cam")) {
+          h.style.display = "none";
+        }
+      }
+    }
+  } catch (e) {}
+}
+
+function ensureNoScrollIfPossible() {
+  // Re-run a few times after camera start because Safari reflows after permission + video play.
+  let tries = 0;
+  const tick = () => {
+    tries++;
+    compactUiForCamera();
+    if (tries < 8) setTimeout(tick, 180);
+  };
+  tick();
+}
+}
 
 function setOverlay(state, markText) {
   bigMark.classList.remove("ok", "no", "unknown");
@@ -419,6 +459,13 @@ let locked = null;
 let lastCandidate = null;
 
 function lockResult(card, method, ocrText) {
+  // Safety: don't lock if we can't compute earliest+pool (avoids "LOCKED" with Unknown fields)
+  const earliestCheck = computeEarliestSet(card);
+  const poolCheck = earliestCheck ? goatPoolCheck(earliestCheck) : { inPool: null };
+  if (!earliestCheck || poolCheck.inPool == null) {
+    dbg("Not locking yet — need full info. Hold steady.");
+    return;
+  }
   locked = { card, method, ocr: ocrText, permanent: true };
   applyCardToUI(card, `LOCKED (${method})`, ocrText);
   scanning = false;
@@ -507,8 +554,8 @@ async function startCamera() {
 
   ensureGuideOverlay();
   redrawGuide();
-  dbg("Camera OK. Scanning…");
-}
+  ensureNoScrollIfPossible();
+  dbg("Camera OK. Scanning…");}
 
 // ---------- Boot / controls ----------
 startBtn.addEventListener("click", async () => {
