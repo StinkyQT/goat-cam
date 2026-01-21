@@ -487,80 +487,6 @@ function redrawGuide() {
   strokeBox(guideCtx, text.x, text.y, text.w, text.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
 }
 
-
-// ---------------- Tap-to-freeze support ----------------
-let freezeLayer = null;
-let isFrozen = false;
-
-// Create a canvas that sits EXACTLY over the video element (not fullscreen) so it won't cover your UI.
-function ensureFreezeLayer() {
-  if (freezeLayer) return;
-  freezeLayer = document.createElement("canvas");
-  freezeLayer.id = "freezeLayer";
-  freezeLayer.style.position = "fixed";
-  freezeLayer.style.pointerEvents = "none";
-  freezeLayer.style.zIndex = "2"; // above video, below guide overlay (guide is 9999)
-  freezeLayer.style.display = "none";
-  document.body.appendChild(freezeLayer);
-
-  window.addEventListener("resize", () => { if (isFrozen) drawFrozenFrame(); });
-  window.addEventListener("scroll", () => { if (isFrozen) drawFrozenFrame(); }, true);
-}
-
-function drawFrozenFrame() {
-  if (!freezeLayer) return false;
-  if (!video.videoWidth || !video.videoHeight) return false;
-
-  const r = video.getBoundingClientRect();
-  if (r.width < 10 || r.height < 10) return false;
-
-  // Position the freeze canvas over the displayed video element
-  freezeLayer.style.left = `${r.left}px`;
-  freezeLayer.style.top = `${r.top}px`;
-  freezeLayer.style.width = `${r.width}px`;
-  freezeLayer.style.height = `${r.height}px`;
-
-  // Real backing size for crisp draw
-  freezeLayer.width = Math.max(1, Math.round(r.width * devicePixelRatio));
-  freezeLayer.height = Math.max(1, Math.round(r.height * devicePixelRatio));
-
-  const c = freezeLayer.getContext("2d");
-  c.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-
-  // Draw the same *visible* portion of the video that the element is showing (object-fit aware)
-  const vis = getVisibleSourceRect();
-  if (!vis) return false;
-
-  const sx = vis.offsetX;
-  const sy = vis.offsetY;
-  const sw = vis.visibleW;
-  const sh = vis.visibleH;
-
-  c.clearRect(0, 0, r.width, r.height);
-  c.drawImage(video, sx, sy, sw, sh, 0, 0, r.width, r.height);
-
-  freezeLayer.style.display = "block";
-  return true;
-}
-
-function freezePreview() {
-  ensureFreezeLayer();
-  const ok = drawFrozenFrame();
-  if (!ok) return false;
-  // Hide live video visually, but keep stream alive
-  video.style.opacity = "0";
-  isFrozen = true;
-  try { redrawGuide(); } catch (e) {}
-  return true;
-}
-
-function unfreezePreview() {
-  if (freezeLayer) freezeLayer.style.display = "none";
-  video.style.opacity = "1";
-  isFrozen = false;
-  try { redrawGuide(); } catch (e) {}
-}
-
 // ---------------- object-fit aware crop mapping ----------------
 function getObjectFit() {
   const cs = window.getComputedStyle(video);
@@ -847,9 +773,14 @@ async function scanOnce() {
       ? (resolved.exact ? "LOCKED (exact match)" : `LOCKED (${resolved.method}, score ${resolved.score.toFixed(2)})`)
       : `Matched (${resolved.method}, score ${resolved.score.toFixed(2)})`;
 
-    applyCardToUI(resolved.card, method, textForUse);
-
-  } catch (e) {
+    // Anti-flicker: only paint full results once we lock.
+// Otherwise, keep showing OCR text so you can see if it's reading cleanly.
+if (lockedNow) {
+  applyCardToUI(resolved.card, method, textForUse);
+} else {
+  if (ocrTextEl) ocrTextEl.textContent = textForUse || "";
+  dbg("Reading… hold steady (waiting to lock)");
+}} catch (e) {
     console.error(e);
     resetUI(`ERROR: ${e.message || e}`);
   } finally {
@@ -858,10 +789,24 @@ async function scanOnce() {
 }
 
 function startAutoScanning() {
-  // Tap-to-freeze build: no continuous OCR (prevents flicker + guessing)
+  if (scanning) return;
   scanning = true;
-  if (toggleScanBtn) toggleScanBtn.textContent = "Scan Card / New Card";
-  dbg("Ready. Line up card in the template, then tap Scan Card.");
+
+  const rate = parseInt(scanRateSel?.value, 10) || 900;
+
+  // Ensure correct UX text
+  if (toggleScanBtn) toggleScanBtn.textContent = "Scan New Card";
+
+  dbg(`Auto-scanning every ${rate}ms… (locks on exact match)`);
+
+  scanTimer = setInterval(() => {
+    if (isLockedActive()) return;
+    scanOnce();
+  }, rate);
+
+  ocrBuffer = [];
+  scanOnce();
+  setTimeout(() => { if (scanning && !isLockedActive()) scanOnce(); }, 220);
 }
 
 function stopAutoScanning() {
@@ -881,7 +826,6 @@ async function initAll() {
   goatPoolCfg = await loadJSON("data/goat_pool_cutoff.json");
 
   await startCamera();
-    try { ensureFreezeLayer(); } catch (e) {}
 
   // After camera is running, nudge controls slightly so you don't need to scroll
   // (Do it now and again shortly after, since iOS can change layout after permission prompts)
@@ -913,36 +857,8 @@ startBtn.addEventListener("click", async () => {
 
 // Scan New Card button (clears lock + immediately scans)
 toggleScanBtn.addEventListener("click", async () => {
-  // If we already locked a result, clear everything for the next card
-  if (locked && locked.card) {
-    try { clearLockAndBuffers(); } catch (e) {}
-    locked = null;
-    lastCandidate = null;
-    ocrBuffer = [];
-    matchCooldownUntil = 0;
-    unfreezePreview();
-    resetUI("Scan new card…");
-    dbg("Ready. Line up card in the template, then tap Scan Card.");
-    return;
-  }
-
-  // Freeze the preview so the name strip doesn't 'wiggle' frame to frame
-  const froze = freezePreview();
-  if (!froze) {
-    resetUI("Camera not ready yet.");
-    return;
-  }
-
-  // Run ONE scan attempt (reuses your existing OCR + match pipeline)
+  clearLockAndBuffers();
+  resetUI("Scan new card…");
+  if (!scanning) startAutoScanning();
   await scanOnce();
-
-  // If scanOnce matched, make it permanent (stay frozen until you clear)
-  if (locked && locked.card) {
-    locked.permanent = true;
-    locked.unlockAt = Date.now();
-    dbg("LOCKED. Tap again for new card.");
-  } else {
-    // Leave preview frozen so you can tap again after adjusting without moving the card
-    dbg("No match. Reduce glare / adjust angle, then tap again.");
-  }
 });
