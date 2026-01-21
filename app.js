@@ -1,14 +1,11 @@
 // Goat Cam - app.js
-// "Safe" layout + behavior fix build (based on the last working auto-scan + permanent exact-lock build).
+// This build focuses on scan reliability + simpler template.
 //
-// Fixes:
-// - Auto-scanning starts immediately after camera is ready (again).
-// - The button is always "Scan New Card" and it actually works (clears lock + scans again).
-// - Layout tweak is *gentle*: we do NOT rebuild the UI or force fullscreen/no-scroll.
-//   Instead we slightly "lift" the existing button row and compact a few text areas so you don't have to scroll.
-//
-// Notes:
-// - If your HTML changes, this file still tries to find the button-row parent safely.
+// Changes:
+// - Template: no labels; single bottom text box; cleaner Yu-Gi-Oh layout.
+// - OCR robustness: multi-pass OCR (BW + grayscale) and auto vertical "micro-scan" (tries a few Y offsets).
+// - Better handling of unknown fields: UI shows matched card even if earliest/pool can't be computed; locking only occurs when fields are known.
+// - Less strict gating so more cards can resolve, while still blocking single-word junk.
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", async () => {
@@ -25,7 +22,7 @@ const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
 const startBtn = document.getElementById("startBtn");
-const toggleScanBtn = document.getElementById("toggleScanBtn"); // "Scan New Card"
+const toggleScanBtn = document.getElementById("toggleScanBtn");
 const scanRateSel = document.getElementById("scanRate");
 
 const bigMark = document.getElementById("bigMark");
@@ -45,8 +42,7 @@ let goatBanlist = {};
 let goatPoolCfg = null;
 
 // Lock state
-// locked = { card, method, lockedAt, unlockAt, ocr, permanent:boolean }
-let locked = null;
+let locked = null; // { card, method, lockedAt, unlockAt, ocr }
 let lastCandidate = null;
 
 // Template overlay
@@ -58,83 +54,28 @@ let matchCooldownUntil = 0;
 
 // Guides (relative to VISIBLE video element)
 const GUIDE = {
+  // Whole card rectangle
   card: { x: 0.10, y: 0.14, w: 0.80, h: 0.74 },
+
+  // Title/name band (OCR)
   name: { x: 0.13, y: 0.17, w: 0.74, h: 0.11 },
+
+  // Art window (for alignment only)
   art:  { x: 0.13, y: 0.30, w: 0.74, h: 0.36 },
+
+  // Set / 1st ed zone (for alignment only)
   set:  { x: 0.13, y: 0.67, w: 0.74, h: 0.08 },
+
+  // Single text box at bottom (for alignment only)
   text: { x: 0.13, y: 0.76, w: 0.74, h: 0.12 }
 };
+
+// OCR reads ONLY the name box:
 const CROP = GUIDE.name;
-
-// ---------------- Gentle layout tweaks ----------------
-function injectGentleCSS() {
-  const css = `
-    /* Keep changes minimal and non-destructive */
-    #debug {
-      max-width: 100%;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      line-height: 1.2;
-    }
-    /* Make long fields a little more compact */
-    #ocrText, #earliest, #goatPool {
-      line-height: 1.15;
-    }
-    /* Give iPhone safe-area some breathing room without forcing no-scroll */
-    body {
-      padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);
-    }
-  `;
-  const style = document.createElement("style");
-  style.textContent = css;
-  document.head.appendChild(style);
-}
-
-function findControlsRow() {
-  // Find the closest common parent that contains BOTH buttons and (ideally) the scan rate.
-  if (!startBtn || !toggleScanBtn) return null;
-
-  const ancestors = new Set();
-  let p = startBtn.parentElement;
-  while (p) { ancestors.add(p); p = p.parentElement; }
-
-  let q = toggleScanBtn.parentElement;
-  while (q && !ancestors.has(q)) q = q.parentElement;
-  let common = q;
-
-  if (!common) return null;
-
-  // Prefer a slightly higher-level row that also contains the rate selector
-  if (scanRateSel) {
-    let up = common;
-    for (let i = 0; i < 3 && up; i++) {
-      if (up.contains(scanRateSel)) return up;
-      up = up.parentElement;
-    }
-  }
-  return common;
-}
-
-function nudgeControlsUp(px = 14) {
-  const row = findControlsRow();
-  if (!row) return;
-
-  // If row is already positioned (fixed/sticky), just adjust margin/translate slightly.
-  const cs = window.getComputedStyle(row);
-  const pos = (cs.position || "").toLowerCase();
-
-  // A gentle lift without altering flow too much.
-  row.style.transform = `translateY(-${px}px)`;
-  row.style.willChange = "transform";
-
-  // If it was at the very bottom with margins, this helps on some iPhones.
-  row.style.marginBottom = "0";
-}
 
 // ---------------- helpers ----------------
 function dbg(msg) {
-  if (debugEl) debugEl.textContent = msg || "";
+  if (debugEl) debugEl.textContent = msg;
 }
 
 async function loadJSON(path) {
@@ -151,10 +92,7 @@ function setOverlay(state, markText) {
 
 function setBanBadge(status) {
   banStatusEl.classList.remove("ok", "warn", "bad");
-  if (!status || status === "—") {
-    banStatusEl.textContent = "—";
-    return;
-  }
+
   if (status === "BANNED") {
     banStatusEl.classList.add("bad");
     banStatusEl.textContent = "🚫 BANNED";
@@ -179,15 +117,8 @@ function resetUI(reason) {
   cardNameEl.textContent = "Not sure";
   goatPoolEl.textContent = "—";
   earliestEl.textContent = "—";
-  setBanBadge("—");
+  setBanBadge("OK");
   if (reason) dbg(reason);
-}
-
-function clearLockAndBuffers() {
-  locked = null;
-  lastCandidate = null;
-  ocrBuffer = [];
-  matchCooldownUntil = 0;
 }
 
 // ---------------- OCR cleanup ----------------
@@ -198,14 +129,25 @@ function basicNormalize(t) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
 function stripJunkPrefixes(t) {
   let s = (t || "").trim();
+
+  // Strip roman numeral / stray leading glyphs like "II ", "I ", "1 ", "l "
   s = s.replace(/^(?:I{1,3}|IV|V|VI{0,3}|1|l|L)\s+/i, "");
+
+  // Strip single-letter prefix like "K ELEMENTAL..."
   s = s.replace(/^[A-Za-z]\s+(?=[A-Za-z])/, "");
+
+  // Remove leading punctuation
   s = s.replace(/^[\-\:\;\'\"\.\,]+/, "").trim();
+
+  // Remove trailing punctuation
   s = s.replace(/[:;,\.\-]+$/, "").trim();
+
   return s;
 }
+
 function cleanFromWords(words) {
   const good = [];
   for (const w of (words || [])) {
@@ -218,38 +160,54 @@ function cleanFromWords(words) {
   const joined = good.join(" ").replace(/\s+/g, " ").trim();
   return stripJunkPrefixes(basicNormalize(joined));
 }
+
 function cleanOCR(rawText, words) {
   const byWords = cleanFromWords(words);
   let s = (byWords && byWords.length >= 5) ? byWords : stripJunkPrefixes(basicNormalize(rawText || ""));
+
+  // If OCR appends ":" then junk after it, keep left
   if (s.includes(":")) {
     const left = s.split(":")[0].trim();
     if (left.length >= 5) s = left;
   }
+
   s = stripJunkPrefixes(s);
+
+  // Common specific fix: "FLEMENTAL" => "ELEMENTAL"
   s = s.replace(/\bFLEMENTAL\b/gi, "ELEMENTAL");
+
   return s.trim();
 }
+
 function looksTooPartial(cleaned) {
   if (!cleaned) return true;
   if (!/[A-Za-z]/.test(cleaned)) return true;
+
   const words = cleaned.split(/\s+/).filter(Boolean);
-  if (words.length < 2) return true;
+  if (words.length < 2) return true; // blocks single-word junk like "ELEMENTAL"
   if (cleaned.length < 7) return true;
+
+  // allow short names, but need at least one word length >= 4
   return !words.some(w => w.length >= 4);
 }
 
 // ---------------- 2-frame OCR merge ----------------
-let ocrBuffer = [];
+let ocrBuffer = []; // [{ cleaned, words:[{text,confidence}], ts }]
+
 function pushOcrBuffer(cleaned, words) {
   ocrBuffer.push({ cleaned, words: (words || []), ts: Date.now() });
   if (ocrBuffer.length > 2) ocrBuffer.shift();
 }
+
 function mergeTwoOcrReads() {
   if (ocrBuffer.length < 2) return ocrBuffer[0]?.cleaned || "";
-  const a = ocrBuffer[0], b = ocrBuffer[1];
+
+  const a = ocrBuffer[0];
+  const b = ocrBuffer[1];
+
   const toTok = (t) => (t || "").replace(/[^A-Za-z0-9'\-]/g, "").toLowerCase();
 
-  const best = new Map();
+  const best = new Map(); // tok -> {text,confidence}
   for (const src of [a, b]) {
     for (const w of (src.words || [])) {
       const text = (w.text || "").trim();
@@ -260,7 +218,10 @@ function mergeTwoOcrReads() {
       if (!prev || conf > prev.confidence) best.set(tok, { text, confidence: conf });
     }
   }
-  if (best.size < 2) return (b.cleaned && b.cleaned.length >= a.cleaned.length) ? b.cleaned : a.cleaned;
+
+  if (best.size < 2) {
+    return (b.cleaned && b.cleaned.length >= a.cleaned.length) ? b.cleaned : a.cleaned;
+  }
 
   const order = [];
   for (const w of (b.words || [])) {
@@ -271,11 +232,13 @@ function mergeTwoOcrReads() {
     const tok = toTok(w.text);
     if (tok && best.has(tok) && !order.includes(tok)) order.push(tok);
   }
+
   const mergedWords = order.map(tok => best.get(tok)).filter(Boolean);
   const joined = mergedWords
     .filter(w => (w.text || "").trim().length >= 1 && (Number.isFinite(w.confidence) ? w.confidence : 0) >= 40)
     .map(w => w.text.trim())
     .join(" ");
+
   return cleanOCR(joined, mergedWords);
 }
 
@@ -295,6 +258,7 @@ async function ygoproLookupExactName(name) {
   const data = await r.json();
   return data.data?.[0] || null;
 }
+
 async function ygoproLookupFuzzyName(fragment) {
   const url = `https://db.ygoprodeck.com/api/v7/cardinfo.php?fname=${encodeURIComponent(fragment)}`;
   const r = await fetch(url);
@@ -302,20 +266,25 @@ async function ygoproLookupFuzzyName(fragment) {
   const data = await r.json();
   return data.data || [];
 }
+
 function levenshtein(a, b) {
-  a = a.toLowerCase(); b = b.toLowerCase();
+  a = a.toLowerCase();
+  b = b.toLowerCase();
   const m = a.length, n = b.length;
   if (m === 0) return n;
   if (n === 0) return m;
   const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
   for (let i = 0; i <= m; i++) dp[i][0] = i;
   for (let j = 0; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++) {
-    const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-    dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
   }
   return dp[m][n];
 }
+
 function similarityScore(ocr, name) {
   const A = (ocr || "").toLowerCase();
   const B = (name || "").toLowerCase();
@@ -323,32 +292,47 @@ function similarityScore(ocr, name) {
   const denom = Math.max(8, Math.max(A.length, B.length));
   return dist / denom;
 }
+
 function pickSearchFragment(ocrText) {
-  const cleaned = (ocrText || "").toLowerCase().replace(/[^a-z0-9'\- ]/g, " ").replace(/\s+/g, " ").trim();
+  const cleaned = (ocrText || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9'\- ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
   const stop = new Set(["the", "of", "and", "a", "an", "hero", "elemental"]);
   const words = cleaned.split(" ").filter(w => w.length >= 4 && !stop.has(w));
-  if (words.length) { words.sort((a, b) => b.length - a.length); return words[0]; }
+  if (words.length) {
+    words.sort((a, b) => b.length - a.length);
+    return words[0];
+  }
   const fallback = cleaned.split(" ").filter(w => w.length >= 4);
   if (fallback.length) return fallback[0];
   return cleaned.slice(0, 10) || cleaned;
 }
-async function resolveCardFromOCR(ocrText) {
-  const exact = await ygoproLookupExactName(ocrText);
-  if (exact) return { card: exact, method: "exact", score: 0.0, exact: true };
 
+async function resolveCardFromOCR(ocrText) {
+  // Try exact first
+  const exact = await ygoproLookupExactName(ocrText);
+  if (exact) return { card: exact, method: "exact", score: 0.0 };
+
+  // Fuzzy by a strong fragment
   const fragment = pickSearchFragment(ocrText);
-  if (!fragment || fragment.length < 3) return { card: null, method: "none", score: 1.0, exact: false };
+  if (!fragment || fragment.length < 3) return { card: null, method: "none", score: 1.0 };
 
   const candidates = await ygoproLookupFuzzyName(fragment);
-  if (!candidates.length) return { card: null, method: "fname-empty", score: 1.0, exact: false };
+  if (!candidates.length) return { card: null, method: "fname-empty", score: 1.0 };
 
   let best = null;
-  for (const c of candidates.slice(0, 220)) {
+  for (const c of candidates.slice(0, 200)) {
     const score = similarityScore(ocrText, c.name);
     if (!best || score < best.score) best = { score, card: c };
   }
-  if (best && best.score <= 0.62) return { card: best.card, method: `fname:${fragment}`, score: best.score, exact: false };
-  return { card: null, method: `fname:${fragment} no-good`, score: best ? best.score : 1.0, exact: false };
+
+  if (best && best.score <= 0.62) {
+    return { card: best.card, method: `fname:${fragment}`, score: best.score };
+  }
+  return { card: null, method: `fname:${fragment} no-good`, score: best ? best.score : 1.0 };
 }
 
 // ---------------- Goat checks ----------------
@@ -363,6 +347,7 @@ function computeEarliestSet(card) {
   }
   return best;
 }
+
 function goatPoolCheck(earliest) {
   const cutoffDate = goatPoolCfg?.cutoff_date;
   if (!cutoffDate) return { inPool: null };
@@ -372,6 +357,7 @@ function goatPoolCheck(earliest) {
   if (!cutoff || !dn) return { inPool: null };
   return { inPool: dn <= cutoff, cutoffDate };
 }
+
 function banStatus(cardId) {
   return goatBanlist[String(cardId)] || "OK";
 }
@@ -383,17 +369,19 @@ async function startCamera() {
     video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
     audio: false
   });
+
   video.srcObject = stream;
   await new Promise((resolve) => (video.onloadedmetadata = () => resolve()));
   await video.play();
 
+  dbg(`Camera OK. videoWidth=${video.videoWidth}, videoHeight=${video.videoHeight}`);
   ensureGuideOverlay();
   redrawGuide();
-  dbg("Camera OK. Scanning…");
 }
 
 function ensureGuideOverlay() {
   if (guideCanvas) return;
+
   guideCanvas = document.createElement("canvas");
   guideCanvas.style.position = "fixed";
   guideCanvas.style.left = "0";
@@ -419,6 +407,7 @@ function roundRect(c, x, y, w, h, r) {
   c.arcTo(x, y, x + w, y, rr);
   c.closePath();
 }
+
 function strokeBox(c, x, y, w, h, stroke, fill) {
   if (fill) {
     c.fillStyle = fill;
@@ -430,6 +419,7 @@ function strokeBox(c, x, y, w, h, stroke, fill) {
   roundRect(c, x, y, w, h, 12);
   c.stroke();
 }
+
 function redrawGuide() {
   if (!guideCanvas || !guideCtx) return;
 
@@ -453,15 +443,39 @@ function redrawGuide() {
   const set  = abs(GUIDE.set);
   const text = abs(GUIDE.text);
 
+  // Dim outside card
   guideCtx.fillStyle = "rgba(0,0,0,0.33)";
   guideCtx.fillRect(0, 0, guideCanvas.width, guideCanvas.height);
   guideCtx.clearRect(card.x, card.y, card.w, card.h);
 
+  // Card outline
   strokeBox(guideCtx, card.x, card.y, card.w, card.h, "rgba(255,255,255,0.92)", null);
+
+  // Name region (scan) - green
   strokeBox(guideCtx, name.x, name.y, name.w, name.h, "rgba(0,255,170,0.98)", "rgba(0,255,170,0.10)");
+
+  // Other regions - subtle white
   strokeBox(guideCtx, art.x, art.y, art.w, art.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
   strokeBox(guideCtx, set.x, set.y, set.w, set.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
   strokeBox(guideCtx, text.x, text.y, text.w, text.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
+
+  // Lock badge
+  if (isLockedActive()) {
+    const badge = "LOCKED";
+    const pad = 10;
+    guideCtx.font = "12px -apple-system, system-ui, Segoe UI, Roboto, sans-serif";
+    const w = guideCtx.measureText(badge).width + pad * 2;
+    const h = 24;
+    const bx = name.x + name.w - w;
+    const by = name.y + name.h + 10;
+
+    guideCtx.fillStyle = "rgba(0,0,0,0.55)";
+    roundRect(guideCtx, bx, by, w, h, 12);
+    guideCtx.fill();
+
+    guideCtx.fillStyle = "rgba(0,255,170,0.98)";
+    guideCtx.fillText(badge, bx + pad, by + 16);
+  }
 }
 
 // ---------------- object-fit aware crop mapping ----------------
@@ -469,11 +483,13 @@ function getObjectFit() {
   const cs = window.getComputedStyle(video);
   return (cs.objectFit || "contain").toLowerCase();
 }
+
 function getVisibleSourceRect() {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
   const r = video.getBoundingClientRect();
-  const dw = r.width, dh = r.height;
+  const dw = r.width;
+  const dh = r.height;
   if (!vw || !vh || dw < 2 || dh < 2) return null;
 
   const fit = getObjectFit();
@@ -490,14 +506,18 @@ function getVisibleSourceRect() {
 
   return { offsetX, offsetY, visibleW, visibleH, vw, vh, fit };
 }
+
 function grabNameStripCanvas(yOffsetFrac = 0) {
-  const vw = video.videoWidth, vh = video.videoHeight;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
   if (!vw || !vh) return null;
 
   const vis = getVisibleSourceRect();
   if (!vis) return null;
 
+  // apply micro y-offset in visible coords (helps if title band is slightly off)
   const y = Math.min(0.95, Math.max(0.0, CROP.y + yOffsetFrac));
+
   let sx = Math.floor(vis.offsetX + vis.visibleW * CROP.x);
   let sy = Math.floor(vis.offsetY + vis.visibleH * y);
   let sw = Math.floor(vis.visibleW * CROP.w);
@@ -507,6 +527,7 @@ function grabNameStripCanvas(yOffsetFrac = 0) {
   sy = Math.max(0, Math.min(vh - 1, sy));
   sw = Math.max(1, Math.min(vw - sx, sw));
   sh = Math.max(1, Math.min(vh - sy, sh));
+
   if (sw < 10 || sh < 10) return null;
 
   const cropCanvas = document.createElement("canvas");
@@ -518,7 +539,8 @@ function grabNameStripCanvas(yOffsetFrac = 0) {
 
 // ---------------- preprocess variants ----------------
 function preprocessBW(srcCanvas) {
-  const w = srcCanvas.width, h = srcCanvas.height;
+  const w = srcCanvas.width;
+  const h = srcCanvas.height;
   const scale = 2.6;
 
   const out = document.createElement("canvas");
@@ -533,7 +555,9 @@ function preprocessBW(srcCanvas) {
   const d = img.data;
 
   let sum = 0;
-  for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  for (let i = 0; i < d.length; i += 4) {
+    sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  }
   const mean = sum / (d.length / 4);
   const threshold = Math.max(80, Math.min(180, mean * 0.90));
 
@@ -545,11 +569,14 @@ function preprocessBW(srcCanvas) {
     d[i] = d[i + 1] = d[i + 2] = v;
     d[i + 3] = 255;
   }
+
   outCtx.putImageData(img, 0, 0);
   return out;
 }
+
 function preprocessGray(srcCanvas) {
-  const w = srcCanvas.width, h = srcCanvas.height;
+  const w = srcCanvas.width;
+  const h = srcCanvas.height;
   const scale = 2.6;
 
   const out = document.createElement("canvas");
@@ -563,6 +590,7 @@ function preprocessGray(srcCanvas) {
   const img = outCtx.getImageData(0, 0, out.width, out.height);
   const d = img.data;
 
+  // Contrast-only grayscale (no binarize)
   for (let i = 0; i < d.length; i += 4) {
     let gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
     gray = (gray - 128) * 1.18 + 128;
@@ -570,12 +598,14 @@ function preprocessGray(srcCanvas) {
     d[i] = d[i + 1] = d[i + 2] = gray;
     d[i + 3] = 255;
   }
+
   outCtx.putImageData(img, 0, 0);
   return out;
 }
 
 // ---------------- Tesseract worker ----------------
 let workerPromise = null;
+
 async function getWorker() {
   if (!workerPromise) {
     workerPromise = (async () => {
@@ -589,12 +619,15 @@ async function getWorker() {
   }
   return workerPromise;
 }
+
 async function ocrWithWorker(canvasToRead) {
   const worker = await getWorker();
   const { data } = await worker.recognize(canvasToRead);
   return data;
 }
+
 function pickBetterOcr(a, b) {
+  // Prefer the one that looks less partial; else longer
   const ca = cleanOCR(a?.text || "", a?.words || []);
   const cb = cleanOCR(b?.text || "", b?.words || []);
   const aBad = looksTooPartial(ca);
@@ -606,36 +639,43 @@ function pickBetterOcr(a, b) {
   return { data: a, cleaned: ca };
 }
 
-// ---------------- Locking ----------------
+// ---------------- Lock-in ----------------
 function isLockedActive() {
-  if (!locked) return false;
-  if (locked.permanent) return true;
-  return Date.now() < locked.unlockAt;
+  return locked && Date.now() < locked.unlockAt;
 }
+
 function canComputeAllFields(card) {
   if (!card) return false;
   const earliest = computeEarliestSet(card);
   const pool = goatPoolCheck(earliest);
   return Boolean(earliest && pool.inPool != null);
 }
-function maybeLockIn(resolved, textForUse) {
+
+function maybeLockIn(resolved, textForUse, ocrConf) {
   if (!resolved || !resolved.card) return false;
   const now = Date.now();
+
+  // Don't lock (or even "believe") matches when OCR confidence is weak.
+  // This prevents "guessy" matches when the read isn't solid.
+  if ((ocrConf ?? 0) < 55) return false;
 
   // PERMANENT lock for exact DB match
   if (resolved.exact === true) {
     locked = { card: resolved.card, method: resolved.method, lockedAt: now, unlockAt: now, ocr: textForUse, permanent: true };
+    matchCooldownUntil = now + 900;
+    stopAutoScanning(); // save CPU + stop flicker
     return true;
   }
 
-  // Temporary lock only when we can compute goat/earliest
+  // Require we can compute all fields (earliest + goat era) before locking
   if (!canComputeAllFields(resolved.card)) return false;
   if (looksTooPartial(textForUse)) return false;
 
   const id = resolved.card.id;
   const score = resolved.score ?? 1.0;
 
-  if (!lastCandidate || lastCandidate.id !== id || now - lastCandidate.lastSeenAt > 2200) {
+  // Track stability across consecutive scans
+  if (!lastCandidate || lastCandidate.id !== id || now - lastCandidate.lastSeenAt > 2500) {
     lastCandidate = { id, seenCount: 1, bestScore: score, lastSeenAt: now };
   } else {
     lastCandidate.seenCount += 1;
@@ -643,29 +683,44 @@ function maybeLockIn(resolved, textForUse) {
     lastCandidate.lastSeenAt = now;
   }
 
-  const goodOnce = score <= 0.15;
-  const stableTwice = lastCandidate.seenCount >= 2 && lastCandidate.bestScore <= 0.48;
+  // Lock rules:
+  // - VERY strong match once => permanent lock
+  // - Strong match twice in a row => permanent lock
+  const veryStrongOnce = score <= 0.18;
+  const strongTwice = lastCandidate.seenCount >= 2 && lastCandidate.bestScore <= 0.40;
 
-  if (goodOnce || stableTwice) {
-    locked = { card: resolved.card, method: resolved.method, lockedAt: now, unlockAt: now + 2600, ocr: textForUse, permanent: false };
-    matchCooldownUntil = now + 700;
+  if (veryStrongOnce || strongTwice) {
+    locked = { card: resolved.card, method: resolved.method, lockedAt: now, unlockAt: now, ocr: textForUse, permanent: true };
+    matchCooldownUntil = now + 900;
+    stopAutoScanning();
     return true;
   }
+
+  // Otherwise, do a short temporary lock (helps reduce flicker while you hold steady)
+  const tempLock = score <= 0.55;
+  if (tempLock) {
+    locked = { card: resolved.card, method: resolved.method, lockedAt: now, unlockAt: now + 2000, ocr: textForUse, permanent: false };
+    matchCooldownUntil = now + 600;
+    return true;
+  }
+
   return false;
 }
 
+
 // ---------------- UI apply ----------------
-function applyCardToUI(card, methodText, textForUse) {
+function applyCardToUI(card, methodText, mergedOcrForUi) {
   cardNameEl.textContent = card?.name || "Not sure";
 
   const earliest = card ? computeEarliestSet(card) : null;
   const pool = earliest ? goatPoolCheck(earliest) : { inPool: null };
-  const b = card ? banStatus(card.id) : "—";
+  const b = card ? banStatus(card.id) : "OK";
 
   if (pool.inPool === true) setOverlay("ok", "✅");
   else if (pool.inPool === false) setOverlay("no", "❌");
   else setOverlay("unknown", "…");
 
+  // IMPORTANT: if we matched a card but earliest/pool is unknown, we still show "Matched" rather than looking stuck.
   goatPoolEl.textContent =
     pool.inPool == null ? "— Unknown (matched card, missing cutoff/date info)" :
     (pool.inPool ? "✅ Included (Goat era)" : "❌ Out of Goat era");
@@ -673,12 +728,12 @@ function applyCardToUI(card, methodText, textForUse) {
   setBanBadge(b);
 
   earliestEl.textContent = earliest ? `${earliest.set_name} (${earliest.date})` : "Unknown (missing set dates)";
-  if (textForUse != null) ocrTextEl.textContent = textForUse;
+  if (mergedOcrForUi != null) ocrTextEl.textContent = mergedOcrForUi;
 
   if (methodText) dbg(methodText);
 }
 
-// ---------------- Scan loop ----------------
+// ---------------- Scan ----------------
 async function scanOnce() {
   if (scanBusy) return;
   scanBusy = true;
@@ -688,37 +743,38 @@ async function scanOnce() {
     if (now < matchCooldownUntil) return;
 
     if (isLockedActive()) {
-      applyCardToUI(locked.card, locked.permanent ? "Locked (exact match)" : `Locked (${locked.method})`, locked.ocr || ocrTextEl.textContent);
+      applyCardToUI(locked.card, `Locked (${locked.method})`, locked.ocr || ocrTextEl.textContent);
       return;
     }
 
-    const attempts = 3;
+    // Micro-scan Y offsets (helps when you "have to move the card up/down" to trigger scans)
     const yOffsets = [0.00, 0.03, -0.03];
 
+    // We'll pick the best OCR from: (best Y strip) x (BW vs Gray)
     let bestPick = null; // { cleaned, data }
-    for (let a = 0; a < attempts; a++) {
-      for (let i = 0; i < yOffsets.length; i++) {
-        const strip = grabNameStripCanvas(yOffsets[i]);
-        if (!strip) continue;
+    let bestStripInfo = "";
 
-        const bw = preprocessBW(strip);
-        const gray = preprocessGray(strip);
+    for (let i = 0; i < yOffsets.length; i++) {
+      const strip = grabNameStripCanvas(yOffsets[i]);
+      if (!strip) continue;
 
-        dbg("Reading name…");
-        setOverlay("unknown", "…");
+      const bw = preprocessBW(strip);
+      const gray = preprocessGray(strip);
 
-        const dataBW = await ocrWithWorker(bw);
-        const dataG  = await ocrWithWorker(gray);
+      dbg("OCR…");
+      setOverlay("unknown", "…");
 
-        const picked = pickBetterOcr(dataBW, dataG);
-        if (!bestPick || picked.cleaned.length > bestPick.cleaned.length) {
-          bestPick = picked;
-        }
+      const dataBW = await ocrWithWorker(bw);
+      const dataG  = await ocrWithWorker(gray);
 
-        if (bestPick && !looksTooPartial(bestPick.cleaned) && bestPick.cleaned.length >= 18) break;
+      const picked = pickBetterOcr(dataBW, dataG);
+      if (!bestPick || picked.cleaned.length > bestPick.cleaned.length) {
+        bestPick = picked;
+        bestStripInfo = `yOffset=${yOffsets[i].toFixed(2)}`;
       }
+
+      // Early exit: if we already got something that looks good, don't waste time
       if (bestPick && !looksTooPartial(bestPick.cleaned) && bestPick.cleaned.length >= 18) break;
-      await new Promise(r => setTimeout(r, 120));
     }
 
     if (!bestPick) {
@@ -739,15 +795,16 @@ async function scanOnce() {
       return;
     }
 
+    // Resolve only after merged OCR is plausible
     const resolved = await resolveCardFromOCR(textForUse);
     if (!resolved.card) {
-      resetUI(`No match (${resolved.method}).`);
+      resetUI(`No match (${resolved.method}). (${bestStripInfo})`);
       return;
     }
 
     const lockedNow = maybeLockIn(resolved, textForUse);
     const method = lockedNow
-      ? (resolved.exact ? "LOCKED (exact match)" : `LOCKED (${resolved.method}, score ${resolved.score.toFixed(2)})`)
+      ? `LOCKED (${resolved.method}, score ${resolved.score.toFixed(2)})`
       : `Matched (${resolved.method}, score ${resolved.score.toFixed(2)})`;
 
     applyCardToUI(resolved.card, method, textForUse);
@@ -760,38 +817,35 @@ async function scanOnce() {
   }
 }
 
-function startAutoScanning() {
+function startScanning() {
   if (scanning) return;
   scanning = true;
+  toggleScanBtn.textContent = "Stop Scanning";
 
-  const rate = parseInt(scanRateSel?.value, 10) || 900;
-
-  // Ensure correct UX text
-  if (toggleScanBtn) toggleScanBtn.textContent = "Scan New Card";
-
-  dbg(`Auto-scanning every ${rate}ms… (locks on exact match)`);
+  const rate = parseInt(scanRateSel.value, 10) || 900;
+  dbg(`Scanning every ${rate}ms…`);
 
   scanTimer = setInterval(() => {
     if (isLockedActive()) return;
     scanOnce();
   }, rate);
 
+  // Prime buffer
   ocrBuffer = [];
   scanOnce();
-  setTimeout(() => { if (scanning && !isLockedActive()) scanOnce(); }, 220);
+  setTimeout(() => { if (scanning) scanOnce(); }, 220);
 }
 
-function stopAutoScanning() {
+function stopScanning() {
   scanning = false;
+  toggleScanBtn.textContent = "Start Scanning";
   if (scanTimer) clearInterval(scanTimer);
   scanTimer = null;
+  dbg("Scanning stopped.");
 }
 
 // ---------------- Boot ----------------
 async function initAll() {
-  // Gentle layout changes (no DOM moving / no fullscreen forcing)
-  injectGentleCSS();
-
   dbg("Loading data…");
   setsRelease = await loadJSON("data/sets_release_dates.json");
   goatBanlist = await loadJSON("data/goat_banlist_2005_04.json");
@@ -799,20 +853,11 @@ async function initAll() {
 
   await startCamera();
 
-  // After camera is running, nudge controls slightly so you don't need to scroll
-  // (Do it now and again shortly after, since iOS can change layout after permission prompts)
-  nudgeControlsUp(14);
-  setTimeout(() => nudgeControlsUp(14), 250);
-
   startBtn.textContent = "Camera Ready";
-  resetUI("Align card in rectangle; name in green box. Scanning…");
-
-  // IMPORTANT: auto-scan starts immediately
-  startAutoScanning();
+  dbg("Tap Start Scanning. Put the full card in the big rectangle; put the NAME in the green box.");
   redrawGuide();
 }
 
-// Start camera button
 startBtn.addEventListener("click", async () => {
   startBtn.disabled = true;
   startBtn.textContent = "Loading…";
@@ -827,10 +872,7 @@ startBtn.addEventListener("click", async () => {
   }
 });
 
-// Scan New Card button (clears lock + immediately scans)
-toggleScanBtn.addEventListener("click", async () => {
-  clearLockAndBuffers();
-  resetUI("Scan new card…");
-  if (!scanning) startAutoScanning();
-  await scanOnce();
+toggleScanBtn.addEventListener("click", () => {
+  if (!scanning) startScanning();
+  else stopScanning();
 });
