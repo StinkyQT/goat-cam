@@ -540,62 +540,6 @@ function redrawGuide() {
   strokeBox(guideCtx, text.x, text.y, text.w, text.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
 }
 
-
-// ---------------- Freeze layer (tap-to-freeze) ----------------
-let freezeLayer = null;
-let isFrozen = false;
-
-function ensureFreezeLayer() {
-  if (freezeLayer) return;
-  freezeLayer = document.createElement("canvas");
-  freezeLayer.id = "freezeLayer";
-  freezeLayer.style.position = "fixed";
-  freezeLayer.style.inset = "0";
-  freezeLayer.style.zIndex = "3"; // above video, below guide overlay
-  freezeLayer.style.pointerEvents = "none";
-  freezeLayer.style.display = "none";
-  document.body.appendChild(freezeLayer);
-}
-
-function showFrozenFrame() {
-  ensureFreezeLayer();
-  if (!video.videoWidth || !video.videoHeight) return false;
-
-  freezeLayer.width = Math.max(1, window.innerWidth);
-  freezeLayer.height = Math.max(1, window.innerHeight);
-
-  const c = freezeLayer.getContext("2d");
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const dw = freezeLayer.width, dh = freezeLayer.height;
-
-  // Draw cover
-  const scale = Math.max(dw / vw, dh / vh);
-  const sw = dw / scale;
-  const sh = dh / scale;
-  const sx = (vw - sw) / 2;
-  const sy = (vh - sh) / 2;
-
-  c.clearRect(0, 0, dw, dh);
-  c.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh);
-
-  freezeLayer.style.display = "block";
-  video.style.opacity = "0";
-  isFrozen = true;
-  try { redrawGuide(); } catch (e) {}
-  return true;
-}
-
-function hideFrozenFrame() {
-  ensureFreezeLayer();
-  freezeLayer.style.display = "none";
-  video.style.opacity = "1";
-  isFrozen = false;
-  try { redrawGuide(); } catch (e) {}
-}
-
-// keep frozen layer sized correctly
-window.addEventListener("resize", () => { if (isFrozen) showFrozenFrame(); });
-
 // ---------------- object-fit aware crop mapping ----------------
 function getObjectFit() {
   const cs = window.getComputedStyle(video);
@@ -882,9 +826,14 @@ async function scanOnce() {
       ? (resolved.exact ? "LOCKED (exact match)" : `LOCKED (${resolved.method}, score ${resolved.score.toFixed(2)})`)
       : `Matched (${resolved.method}, score ${resolved.score.toFixed(2)})`;
 
-    applyCardToUI(resolved.card, method, textForUse);
-
-  } catch (e) {
+    // HYBRID anti-flicker: only paint full results when we lock.
+// Otherwise, show OCR + a steady "reading" message.
+if (lockedNow) {
+  applyCardToUI(resolved.card, method, textForUse);
+} else {
+  if (ocrTextEl) ocrTextEl.textContent = textForUse || "";
+  dbg("Reading… hold steady (waiting to lock)");
+}} catch (e) {
     console.error(e);
     resetUI(`ERROR: ${e.message || e}`);
   } finally {
@@ -893,10 +842,24 @@ async function scanOnce() {
 }
 
 function startAutoScanning() {
-  // Tap-to-freeze build: no continuous OCR (prevents flicker + guessing)
+  if (scanning) return;
   scanning = true;
-  if (toggleScanBtn) toggleScanBtn.textContent = "Scan Card / New Card";
-  dbg("Ready. Line up card, then tap Scan Card.");
+
+  const rate = parseInt(scanRateSel?.value, 10) || 900;
+
+  // Ensure correct UX text
+  if (toggleScanBtn) toggleScanBtn.textContent = "Scan New Card";
+
+  dbg(`Auto-scanning every ${rate}ms… (locks on exact match)`);
+
+  scanTimer = setInterval(() => {
+    if (isLockedActive()) return;
+    scanOnce();
+  }, rate);
+
+  ocrBuffer = [];
+  scanOnce();
+  setTimeout(() => { if (scanning && !isLockedActive()) scanOnce(); }, 220);
 }
 
 function stopAutoScanning() {
@@ -943,35 +906,8 @@ startBtn.addEventListener("click", async () => {
 
 // Scan New Card button (clears lock + immediately scans)
 toggleScanBtn.addEventListener("click", async () => {
-  // If locked, clear for new card
-  if (locked && locked.card) {
-    try { clearLockAndBuffers(); } catch (e) {}
-    locked = null;
-    lastCandidate = null;
-    ocrBuffer = [];
-    matchCooldownUntil = 0;
-    hideFrozenFrame();
-    resetUI("Scan new card…");
-    dbg("Ready. Line up card, then tap Scan Card.");
-    return;
-  }
-
-  // Freeze frame visually
-  const froze = showFrozenFrame();
-  if (!froze) {
-    resetUI("Camera not ready yet.");
-    return;
-  }
-
-  // One-shot scan (reuse existing pipeline)
+  clearLockAndBuffers();
+  resetUI("Scan new card…");
+  if (!scanning) startAutoScanning();
   await scanOnce();
-
-  // If we matched/locked, make it permanent and keep frozen until cleared
-  if (locked && locked.card) {
-    locked.permanent = true;
-    locked.unlockAt = Date.now();
-    dbg("LOCKED. Tap again for new card.");
-  } else {
-    dbg("No match. Reduce glare / adjust angle, then tap again.");
-  }
 });
