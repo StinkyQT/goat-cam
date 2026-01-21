@@ -83,11 +83,120 @@ function removeTopBars() {
         const h = el.closest("header");
         if (h) h.style.display = "none";
       }
+
+
+function injectPrettyStyles() {
+  if (document.getElementById("prettyStyles")) return;
+  const style = document.createElement("style");
+  style.id = "prettyStyles";
+  style.textContent = `
+    :root { --gc-radius: 16px; --gc-border: rgba(0,0,0,.10); --gc-shadow: 0 10px 25px rgba(0,0,0,.12); }
+    /* Buttons */
+    #startBtn, #toggleScanBtn {
+      border: 1px solid var(--gc-border);
+      border-radius: 999px;
+      padding: 12px 14px;
+      font-weight: 700;
+      font-size: 16px;
+      line-height: 1;
+      box-shadow: 0 6px 18px rgba(0,0,0,.10);
+      -webkit-tap-highlight-color: transparent;
+    }
+    #startBtn { background: #ffffff; }
+    #toggleScanBtn { background: #ffffff; }
+    #startBtn:disabled { opacity: .6; box-shadow: none; }
+
+    /* Dropdown */
+    #scanRate {
+      border: 1px solid var(--gc-border);
+      border-radius: 999px;
+      padding: 10px 12px;
+      font-weight: 600;
+      font-size: 14px;
+      background: #ffffff;
+    }
+
+    /* Sticky control tray (best-effort; we set on the parent via JS too) */
+    .gc-controls-tray {
+      position: sticky;
+      bottom: 0;
+      z-index: 50;
+      padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      background: rgba(255,255,255,.85);
+      border-top: 1px solid rgba(0,0,0,.08);
+    }
+    .gc-controls-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .gc-controls-row > * { flex: 1; }
+    .gc-controls-row #scanRate { flex: 0.9; }
+  `;
+  document.head.appendChild(style);
+}
+
+function beautifyControlsAndFit() {
+  injectPrettyStyles();
+  removeTopBars();
+
+  // Find the common parent for the controls (best-effort)
+  const btnA = document.getElementById("startBtn");
+  const btnB = document.getElementById("toggleScanBtn");
+  const rate = document.getElementById("scanRate");
+  if (!btnA || !btnB) return;
+
+  // Choose a tray container: nearest shared parent
+  let tray = btnA.parentElement;
+  while (tray && tray !== document.body) {
+    if (tray.contains(btnB)) break;
+    tray = tray.parentElement;
+  }
+  if (!tray) tray = btnA.parentElement;
+
+  // Wrap buttons+select into a row if not already
+  // We'll create a row container and move elements into it, but only once.
+  if (!tray.classList.contains("gc-controls-tray")) {
+    tray.classList.add("gc-controls-tray");
+  }
+
+  // Build / reuse a row
+  let row = tray.querySelector(".gc-controls-row");
+  if (!row) {
+    row = document.createElement("div");
+    row.className = "gc-controls-row";
+    // Move the three controls into the row, preserving order: start, scan new, rate (if exists)
+    const toMove = [btnA, btnB, rate].filter(Boolean);
+    for (const el of toMove) {
+      // Only move if it's currently in tray (avoid duplicating/moving from elsewhere unexpectedly)
+      try { tray.contains(el) && row.appendChild(el); } catch {}
+    }
+    tray.appendChild(row);
+  }
+
+  // Fit video to remaining space (dynamic maxHeight)
+  const doFit = () => {
+    try {
+      const trayH = tray.getBoundingClientRect().height;
+      const margin = 18; // breathing room
+      const maxH = Math.max(220, Math.floor(window.innerHeight - trayH - margin));
+      video.style.maxHeight = maxH + "px";
+      video.style.width = "100%";
+      video.style.height = "auto";
+    } catch {}
+  };
+
+  doFit();
+  window.addEventListener("resize", doFit);
+  window.addEventListener("orientationchange", () => setTimeout(doFit, 250));
+}
+
     }
   } catch {}
 }
-document.addEventListener("DOMContentLoaded", () => { removeTopBars(); setTimeout(removeTopBars, 250); });
-
+document.addEventListener("DOMContentLoaded", () => { removeTopBars(); setTimeout(removeTopBars, 250); beautifyControlsAndFit(); });
 // Data
 async function loadJSON(path) {
   const r = await fetch(path, { cache: "no-store" });
@@ -451,6 +560,7 @@ async function startCamera() {
     await video.play();
   }
   removeTopBars();
+  beautifyControlsAndFit();
   ensureGuideOverlay();
   redrawGuide();
   dbg(`Camera OK (${video.videoWidth}x${video.videoHeight}).`);
