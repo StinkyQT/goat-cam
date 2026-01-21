@@ -398,6 +398,7 @@ function ensureGuideOverlay() {
   guideCanvas.style.top = "0";
   guideCanvas.style.zIndex = "9999";
   guideCanvas.style.pointerEvents = "none";
+  guideCanvas.style.display = "none";
   document.body.appendChild(guideCanvas);
   guideCtx = guideCanvas.getContext("2d");
   window.addEventListener("resize", redrawGuide);
@@ -420,12 +421,18 @@ function strokeBox(c, x, y, w, h, stroke, fill) {
 }
 function redrawGuide() {
   if (!guideCanvas || !guideCtx) return;
+
   guideCanvas.width = Math.max(1, window.innerWidth);
   guideCanvas.height = Math.max(1, window.innerHeight);
   guideCtx.clearRect(0, 0, guideCanvas.width, guideCanvas.height);
 
   const r = video.getBoundingClientRect();
-  if (r.width < 10 || r.height < 10) return;
+  // If the video isn't laid out yet, do NOT draw the dark mask (prevents full black screen).
+  if (r.width < 20 || r.height < 20) {
+    guideCanvas.style.display = "none";
+    return;
+  }
+  guideCanvas.style.display = "block";
 
   const abs = (b) => ({
     x: r.left + r.width * b.x,
@@ -440,8 +447,11 @@ function redrawGuide() {
   const set  = abs(GUIDE.set);
   const text = abs(GUIDE.text);
 
+  // IMPORTANT: Only dim the VIDEO area, not the whole screen (so UI/debug remain visible).
   guideCtx.fillStyle = "rgba(0,0,0,0.33)";
-  guideCtx.fillRect(0, 0, guideCanvas.width, guideCanvas.height);
+  guideCtx.fillRect(r.left, r.top, r.width, r.height);
+
+  // Clear the card window inside the dimmed video area
   guideCtx.clearRect(card.x, card.y, card.w, card.h);
 
   strokeBox(guideCtx, card.x, card.y, card.w, card.h, "rgba(255,255,255,0.92)", null);
