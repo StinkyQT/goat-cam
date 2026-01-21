@@ -600,18 +600,62 @@ function startAutoScanning() {
 // ---------- Camera ----------
 async function startCamera() {
   dbg("Requesting camera…");
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
-    audio: false
-  });
+
+  // iOS/Safari friendliness: ensure inline playback + muted (prevents weird black video cases)
+  try {
+    video.setAttribute("playsinline", "");
+    video.setAttribute("webkit-playsinline", "");
+    video.playsInline = true;
+    video.muted = true;
+    video.autoplay = true;
+  } catch (e) {}
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+  } catch (e) {
+    dbg("Camera permission denied or unavailable.");
+    throw e;
+  }
+
   video.srcObject = stream;
+
+  // Wait for metadata, then attempt playback
   await new Promise(resolve => (video.onloadedmetadata = () => resolve()));
-  await video.play();
+
+  try {
+    await video.play();
+  } catch (e) {
+    // Some Safari builds need a second play attempt after a short delay
+    dbg("Starting video…");
+    await new Promise(r => setTimeout(r, 200));
+    await video.play();
+  }
 
   ensureGuideOverlay();
   redrawGuide();
-  dbg("Camera OK. Scanning…");
+  try { tightenSpacingForSmallScreens?.(); } catch {}
+  try { ensureNoScrollIfPossible?.(); } catch {}
+  try { focusCameraView?.(); } catch {}
+
+  // Diagnostics (helps if we still get black)
+  setTimeout(() => {
+    try {
+      const w = video.videoWidth, h = video.videoHeight;
+      const rs = video.readyState;
+      const hasStream = !!video.srcObject;
+      const playing = !video.paused && !video.ended;
+      if (!hasStream) dbg("No stream attached (unexpected).");
+      else if (!playing) dbg("Video not playing — tap the screen once, then try Start Camera again.");
+      else if (!w || !h || rs < 2) dbg("Video feed not ready (black) — refresh or try Private tab.");
+      else dbg(`Camera OK (${w}x${h}). Scanning…`);
+    } catch {}
+  }, 250);
 }
+
 
 // ---------- Boot / controls ----------
 startBtn.addEventListener("click", async () => {
@@ -632,7 +676,7 @@ startBtn.addEventListener("click", async () => {
     startAutoScanning();
   } catch (e) {
     console.error(e);
-    alert("Failed to start. Open in Safari and allow Camera.");
+    alert("Failed to start camera. Check Safari camera permission and reload.");
     startBtn.disabled = false;
     startBtn.textContent = "Start Camera";
     resetUI(e.message || String(e));
