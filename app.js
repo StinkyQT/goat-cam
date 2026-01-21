@@ -90,113 +90,125 @@ function injectPrettyStyles() {
   const style = document.createElement("style");
   style.id = "prettyStyles";
   style.textContent = `
-    :root { --gc-radius: 16px; --gc-border: rgba(0,0,0,.10); --gc-shadow: 0 10px 25px rgba(0,0,0,.12); }
-    /* Buttons */
+    :root { --gc-border: rgba(0,0,0,.12); --gc-shadow: 0 10px 25px rgba(0,0,0,.14); }
+    /* Force-clean button style (override any existing CSS) */
     #startBtn, #toggleScanBtn {
-      border: 1px solid var(--gc-border);
-      border-radius: 999px;
-      padding: 12px 14px;
-      font-weight: 700;
-      font-size: 16px;
-      line-height: 1;
-      box-shadow: 0 6px 18px rgba(0,0,0,.10);
-      -webkit-tap-highlight-color: transparent;
+      appearance: none !important;
+      -webkit-appearance: none !important;
+      border: 1px solid var(--gc-border) !important;
+      border-radius: 999px !important;
+      padding: 12px 14px !important;
+      font-weight: 800 !important;
+      font-size: 16px !important;
+      line-height: 1 !important;
+      box-shadow: 0 6px 18px rgba(0,0,0,.10) !important;
+      background: #ffffff !important;
+      color: #111 !important;
+      -webkit-tap-highlight-color: transparent !important;
     }
-    #startBtn { background: #ffffff; }
-    #toggleScanBtn { background: #ffffff; }
-    #startBtn:disabled { opacity: .6; box-shadow: none; }
-
-    /* Dropdown */
+    #startBtn:disabled {
+      opacity: .65 !important;
+      box-shadow: none !important;
+    }
     #scanRate {
-      border: 1px solid var(--gc-border);
-      border-radius: 999px;
-      padding: 10px 12px;
-      font-weight: 600;
-      font-size: 14px;
-      background: #ffffff;
+      border: 1px solid var(--gc-border) !important;
+      border-radius: 999px !important;
+      padding: 10px 12px !important;
+      font-weight: 700 !important;
+      font-size: 14px !important;
+      background: #ffffff !important;
+      color: #111 !important;
     }
 
-    /* Sticky control tray (best-effort; we set on the parent via JS too) */
-    .gc-controls-tray {
-      position: sticky;
-      bottom: 0;
-      z-index: 50;
-      padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      background: rgba(255,255,255,.85);
-      border-top: 1px solid rgba(0,0,0,.08);
+    /* Fixed bottom tray that always fits on iPhone */
+    #gcTray {
+      position: fixed !important;
+      left: 0 !important;
+      right: 0 !important;
+      bottom: 0 !important;
+      z-index: 9998 !important; /* below overlay canvas (9999) */
+      padding: 10px 12px calc(10px + env(safe-area-inset-bottom)) !important;
+      backdrop-filter: blur(10px) !important;
+      -webkit-backdrop-filter: blur(10px) !important;
+      background: rgba(255,255,255,.90) !important;
+      border-top: 1px solid rgba(0,0,0,.08) !important;
     }
-    .gc-controls-row {
-      display: flex;
-      gap: 10px;
-      align-items: center;
+    #gcTrayRow {
+      display: flex !important;
+      gap: 10px !important;
+      align-items: center !important;
     }
-    .gc-controls-row > * { flex: 1; }
-    .gc-controls-row #scanRate { flex: 0.9; }
+    #gcTrayRow > * { flex: 1 1 auto !important; }
+    #gcTrayRow #scanRate { flex: 0.9 1 auto !important; }
+
+    /* Prevent accidental body padding from causing extra scroll */
+    body { overflow-x: hidden !important; }
   `;
   document.head.appendChild(style);
 }
 
 function beautifyControlsAndFit() {
-  injectPrettyStyles();
-  removeTopBars();
+  try { injectPrettyStyles(); } catch {}
+  try { removeTopBars(); } catch {}
 
-  // Find the common parent for the controls (best-effort)
   const btnA = document.getElementById("startBtn");
   const btnB = document.getElementById("toggleScanBtn");
   const rate = document.getElementById("scanRate");
-  if (!btnA || !btnB) return;
+  if (!btnA || !btnB || !video) return;
 
-  // Choose a tray container: nearest shared parent
-  let tray = btnA.parentElement;
-  while (tray && tray !== document.body) {
-    if (tray.contains(btnB)) break;
-    tray = tray.parentElement;
+  // Create a fixed tray once, then move controls into it.
+  let tray = document.getElementById("gcTray");
+  let row = document.getElementById("gcTrayRow");
+  if (!tray) {
+    tray = document.createElement("div");
+    tray.id = "gcTray";
+    row = document.createElement("div");
+    row.id = "gcTrayRow";
+    tray.appendChild(row);
+    document.body.appendChild(tray);
   }
-  if (!tray) tray = btnA.parentElement;
-
-  // Wrap buttons+select into a row if not already
-  // We'll create a row container and move elements into it, but only once.
-  if (!tray.classList.contains("gc-controls-tray")) {
-    tray.classList.add("gc-controls-tray");
-  }
-
-  // Build / reuse a row
-  let row = tray.querySelector(".gc-controls-row");
   if (!row) {
     row = document.createElement("div");
-    row.className = "gc-controls-row";
-    // Move the three controls into the row, preserving order: start, scan new, rate (if exists)
-    const toMove = [btnA, btnB, rate].filter(Boolean);
-    for (const el of toMove) {
-      // Only move if it's currently in tray (avoid duplicating/moving from elsewhere unexpectedly)
-      try { tray.contains(el) && row.appendChild(el); } catch {}
-    }
+    row.id = "gcTrayRow";
     tray.appendChild(row);
   }
 
-  // Fit video to remaining space (dynamic maxHeight)
+  // Move controls into tray row (preserve order)
+  const toMove = [btnA, btnB, rate].filter(Boolean);
+  for (const el of toMove) {
+    try {
+      if (el && el.parentElement !== row) row.appendChild(el);
+    } catch {}
+  }
+
+  // Fit video so NO scroll is needed: max-height = viewport - tray height - small margin.
   const doFit = () => {
     try {
-      const trayH = tray.getBoundingClientRect().height;
-      const margin = 18; // breathing room
+      const trayH = tray.getBoundingClientRect().height || 0;
+      const margin = 14;
       const maxH = Math.max(220, Math.floor(window.innerHeight - trayH - margin));
       video.style.maxHeight = maxH + "px";
       video.style.width = "100%";
       video.style.height = "auto";
+      // If still overflowing, jump back to top
+      if (document.documentElement.scrollHeight - window.innerHeight > 6) {
+        window.scrollTo(0, 0);
+      }
     } catch {}
   };
 
   doFit();
   window.addEventListener("resize", doFit);
   window.addEventListener("orientationchange", () => setTimeout(doFit, 250));
+  setTimeout(doFit, 200);
+  setTimeout(doFit, 600);
 }
 
     }
   } catch {}
 }
-document.addEventListener("DOMContentLoaded", () => { removeTopBars(); setTimeout(removeTopBars, 250); try { beautifyControlsAndFit(); } catch (e) {} });
+document.addEventListener("DOMContentLoaded", () => { removeTopBars();
+  try { beautifyControlsAndFit(); } catch (e) {} setTimeout(removeTopBars, 250); try { beautifyControlsAndFit(); } catch (e) {} });
 // Data
 async function loadJSON(path) {
   const r = await fetch(path, { cache: "no-store" });
