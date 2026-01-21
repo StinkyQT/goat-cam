@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Goat Cam</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0b0b0b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+
+  <link rel="stylesheet" href="styles.css" />
+
+  <!-- OCR + fuzzy match -->
+  <script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0"></script>
+
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div id="app">
+    <div id="videoWrap">
+      <video id="video" autoplay playsinline></video>
+
+      <!-- Overlay -->
+      <div id="overlay">
+        <div id="bigMark" class="unknown">…</div>
+
+        <div id="lines">
+          <div class="line">
+            <span class="label">Card</span>
+            <span id="cardName">—</span>
+          </div>
+
+          <div class="line">
+            <span class="label">Goat Pool</span>
+            <span id="goatPool">—</span>
+          </div>
+
+          <div class="line">
+            <span class="label">Banlist</span>
+            <span id="banStatus" class="badge">—</span>
+          </div>
+
+          <div class="line">
+            <span class="label">Earliest</span>
+            <span id="earliest">—</span>
+          </div>
+
+          <div class="line small">
+            <span class="label">OCR</span>
+            <span id="ocrText">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Hidden canvas to grab frames -->
+      <canvas id="canvas" width="1280" height="720"></canvas>
+    </div>
+
+    <div id="controls">
+      <button id="startBtn">Start Camera</button>
+      <button id="toggleScanBtn">Start Scanning</button>
+
+      <label class="chk">
+        Scan every
+        <select id="scanRate">
+          <option value="600">0.6s</option>
+          <option value="900" selected>0.9s</option>
+          <option value="1300">1.3s</option>
+          <option value="1800">1.8s</option>
+        </select>
+      </label>
+
+      <div id="debug" style="width:100%;opacity:.85;font-size:12px;"></div>
+    </div>
+  </div>
+</body>
+</html>
