@@ -27,7 +27,44 @@ const earliestEl = document.getElementById("earliest");
 const ocrTextEl = document.getElementById("ocrText");
 const debugEl = document.getElementById("debug");
 
-function dbg(msg) { if (debugEl) debugEl.textContent = msg || ""; }
+
+let floatingDebugEl = null;
+function ensureFloatingDebug() {
+  if (floatingDebugEl) return;
+  floatingDebugEl = document.createElement("div");
+  floatingDebugEl.id = "floatingDebug";
+  floatingDebugEl.style.position = "fixed";
+  floatingDebugEl.style.left = "8px";
+  floatingDebugEl.style.top = "8px";
+  floatingDebugEl.style.zIndex = "2147483647";
+  floatingDebugEl.style.maxWidth = "92vw";
+  floatingDebugEl.style.padding = "8px 10px";
+  floatingDebugEl.style.borderRadius = "12px";
+  floatingDebugEl.style.background = "rgba(0,0,0,0.55)";
+  floatingDebugEl.style.color = "#fff";
+  floatingDebugEl.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
+  floatingDebugEl.style.fontSize = "14px";
+  floatingDebugEl.style.lineHeight = "1.2";
+  floatingDebugEl.style.pointerEvents = "auto";
+  floatingDebugEl.style.userSelect = "none";
+  floatingDebugEl.textContent = "Goat Cam ready.";
+  // Tap this box to toggle template overlay on/off (panic switch)
+  floatingDebugEl.addEventListener("click", () => {
+    try {
+      if (guideCanvas) {
+        const isHidden = guideCanvas.style.display === "none";
+        guideCanvas.style.display = isHidden ? "block" : "none";
+        floatingDebugEl.textContent = isHidden ? "Template ON" : "Template OFF";
+      }
+    } catch {}
+  });
+  document.body.appendChild(floatingDebugEl);
+}
+
+function dbg(msg) {
+  if (debugEl) debugEl.textContent = msg || "";
+  try { ensureFloatingDebug(); if (floatingDebugEl) floatingDebugEl.textContent = msg || ""; } catch {}
+}
 
 
 
@@ -609,9 +646,9 @@ function startAutoScanning() {
 
 // ---------- Camera ----------
 async function startCamera() {
+  ensureFloatingDebug();
   dbg("Requesting camera…");
-
-  // iOS/Safari friendliness: ensure inline playback + muted (prevents weird black video cases)
+// iOS/Safari friendliness: ensure inline playback + muted (prevents weird black video cases)
   try {
     video.setAttribute("playsinline", "");
     video.setAttribute("webkit-playsinline", "");
@@ -638,7 +675,35 @@ async function startCamera() {
 
   try {
     await video.play();
-  } catch (e) {
+
+  // iOS can report layout/video size late; wait until we have dimensions before showing template.
+  const waitForVideoSize = async () => {
+    for (let i = 0; i < 15; i++) {
+      const ok = video.videoWidth > 0 && video.videoHeight > 0;
+      if (ok) return true;
+      await new Promise(r => setTimeout(r, 80));
+    }
+    return false;
+  };
+
+  const hasSize = await waitForVideoSize();
+  if (!hasSize) {
+    dbg("Camera started but video size is 0 (black). Try: Safari Private tab, then Start Camera again.");
+  }
+
+  // Show template only when video is laid out (prevents full-screen black mask situations)
+  ensureGuideOverlay();
+  if (hasSize) {
+    guideCanvas.style.display = "block";
+    redrawGuide();
+  } else {
+    guideCanvas.style.display = "none";
+  }
+
+  // Keep UI visible even if video is black: bring buttons into view
+  try { focusCameraView?.(); } catch {}
+
+} catch (e) {
     // Some Safari builds need a second play attempt after a short delay
     dbg("Starting video…");
     await new Promise(r => setTimeout(r, 200));
