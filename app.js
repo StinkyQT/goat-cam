@@ -31,14 +31,6 @@ function dbg(msg) { if (debugEl) debugEl.textContent = msg || ""; }
 
 
 
-function scrollTopAfterCamera() {
-  try {
-    // After hiding header, jump to top so template is fully visible.
-    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
-  } catch (e) {
-    try { window.scrollTo(0, 0); } catch {}
-  }
-}
 
 function focusCameraView() {
   // After you tap Start Camera, Safari often keeps you scrolled near the buttons.
@@ -58,21 +50,18 @@ function focusCameraView() {
 
 
 function hideGoatCamHeader() {
-  // Remove the top black bar / title that says "Goat Cam" to reclaim vertical space.
+  // Safer: only hide obvious title/header elements that contain "Goat Cam".
   try {
     const needles = ["goat cam"];
-    const all = Array.from(document.querySelectorAll("header,h1,h2,div,span,section"));
-    for (const el of all) {
+    const elems = Array.from(document.querySelectorAll("header, h1, h2"));
+    for (const el of elems) {
       const t = (el.textContent || "").trim().toLowerCase();
       if (!t) continue;
-      if (needles.some(n => t === n || t.startsWith(n))) {
+      if (needles.some(n => t.includes(n))) {
         el.style.display = "none";
-        // Hide a likely containing bar if it's tall
-        const p = el.parentElement;
-        if (p) {
-          const ph = p.getBoundingClientRect().height;
-          if (ph >= 40) p.style.display = "none";
-        }
+        // If it's inside a <header>, hide that header wrapper too.
+        const p = el.closest("header");
+        if (p) p.style.display = "none";
       }
     }
   } catch (e) {}
@@ -598,7 +587,20 @@ function startAutoScanning() {
 }
 
 // ---------- Camera ----------
-async function startCamera() {
+async 
+function sanityCheckVideo() {
+  try {
+    // If video is not rendering, show a helpful debug message.
+    const r = video.getBoundingClientRect();
+    const hasStream = !!video.srcObject;
+    const playing = !video.paused && !video.ended && video.readyState >= 2;
+    if (!hasStream) dbg("No camera stream (permission?)");
+    else if (!playing) dbg("Camera stream started but video not playing — tap screen or refresh.");
+    else if (r.width < 50 || r.height < 50) dbg("Video area too small (layout hidden) — refresh.");
+  } catch (e) {}
+}
+
+function startCamera() {
   dbg("Requesting camera…");
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -607,9 +609,11 @@ async function startCamera() {
   video.srcObject = stream;
   await new Promise(resolve => (video.onloadedmetadata = () => resolve()));
   await video.play();
+  try { sanityCheckVideo(); } catch {}
 
   ensureGuideOverlay();
   redrawGuide();
+  try { sanityCheckVideo(); } catch {}
   dbg("Camera OK. Scanning…");
 }
 
