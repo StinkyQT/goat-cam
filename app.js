@@ -30,6 +30,16 @@ const debugEl = document.getElementById("debug");
 function dbg(msg) { if (debugEl) debugEl.textContent = msg || ""; }
 
 
+
+function scrollTopAfterCamera() {
+  try {
+    // After hiding header, jump to top so template is fully visible.
+    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+  } catch (e) {
+    try { window.scrollTo(0, 0); } catch {}
+  }
+}
+
 function focusCameraView() {
   // After you tap Start Camera, Safari often keeps you scrolled near the buttons.
   // This scrolls the video/template area into view automatically.
@@ -46,7 +56,30 @@ function focusCameraView() {
   }
 }
 
+
+function hideGoatCamHeader() {
+  // Remove the top black bar / title that says "Goat Cam" to reclaim vertical space.
+  try {
+    const needles = ["goat cam"];
+    const all = Array.from(document.querySelectorAll("header,h1,h2,div,span,section"));
+    for (const el of all) {
+      const t = (el.textContent || "").trim().toLowerCase();
+      if (!t) continue;
+      if (needles.some(n => t === n || t.startsWith(n))) {
+        el.style.display = "none";
+        // Hide a likely containing bar if it's tall
+        const p = el.parentElement;
+        if (p) {
+          const ph = p.getBoundingClientRect().height;
+          if (ph >= 40) p.style.display = "none";
+        }
+      }
+    }
+  } catch (e) {}
+}
+
 function tightenSpacingForSmallScreens() {
+  try { hideGoatCamHeader(); } catch (e) {}
   // Light-touch spacing tweaks (no layout restructure) to reduce needed scrolling on iPhone.
   try {
     const isSmall = Math.min(window.innerWidth, window.innerHeight) <= 430;
@@ -469,7 +502,26 @@ let scanBusy = false;
 let locked = null;
 let lastCandidate = null;
 
+
+function canLockCard(card) {
+  // Only lock if we can compute earliest set/date AND goat inclusion.
+  try {
+    const earliestCheck = computeEarliestSet(card);
+    const poolCheck = earliestCheck ? goatPoolCheck(earliestCheck) : { inPool: null };
+    if (!earliestCheck || !earliestCheck.date) return { ok: false, reason: "earliest-missing" };
+    if (poolCheck.inPool == null) return { ok: false, reason: "pool-unknown" };
+    return { ok: true, earliestCheck, poolCheck };
+  } catch (e) {
+    return { ok: false, reason: "exception" };
+  }
+}
+
 function lockResult(card, method, ocrText) {
+  const chk = canLockCard(card);
+  if (!chk.ok) {
+    dbg("Matched name, but waiting for full info… hold steady");
+    return;
+  }
   locked = { card, method, ocr: ocrText, permanent: true };
   applyCardToUI(card, `LOCKED (${method})`, ocrText);
   scanning = false;
@@ -575,6 +627,8 @@ startBtn.addEventListener("click", async () => {
     startBtn.textContent = "Camera Ready";
     try { focusCameraView(); } catch {}
     resetUI("Line up card; name in green box. Hold steady.");
+    try { hideGoatCamHeader(); } catch {}
+    try { tightenSpacingForSmallScreens(); } catch {}
     startAutoScanning();
   } catch (e) {
     console.error(e);
