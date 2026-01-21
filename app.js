@@ -66,7 +66,7 @@ window.addEventListener("unhandledrejection", (e) => {
 })();
 
 // ----------------- ORIGINAL APP STARTS HERE -----------------
-// (This build disables the template overlay canvas entirely to avoid screen-dimming bugs.)
+// Template overlay is enabled safely (dims only inside the video rectangle).
 
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
@@ -86,6 +86,23 @@ const debugEl = document.getElementById("debug");
 
 function dbg(msg) {
   try { if (debugEl) debugEl.textContent = msg || ""; } catch {}
+
+
+function hideTopTitleBar() {
+  try {
+    const headers = Array.from(document.querySelectorAll("header,h1,h2"));
+    for (const el of headers) {
+      const t = (el.textContent || "").trim().toLowerCase();
+      if (t.includes("goat cam")) {
+        el.style.display = "none";
+        const h = el.closest("header");
+        if (h) h.style.display = "none";
+      }
+    }
+  } catch {}
+}
+document.addEventListener("DOMContentLoaded", () => { try { hideTopTitleBar(); } catch {} });
+
   try {
     const b = document.getElementById("recoveryBanner");
     if (b && msg) b.textContent = msg;
@@ -293,6 +310,104 @@ function getVisibleSourceRect() {
 }
 
 const CROP = { x: 0.13, y: 0.17, w: 0.74, h: 0.11 };
+
+// ---------------- Template overlay (SAFE) ----------------
+// This overlay ONLY dims inside the video rectangle, so it can never black-out the whole page.
+let guideCanvas = null;
+let guideCtx = null;
+
+const GUIDE = {
+  card: { x: 0.10, y: 0.14, w: 0.80, h: 0.74 },
+  name: { x: 0.13, y: 0.17, w: 0.74, h: 0.11 },
+  art:  { x: 0.13, y: 0.30, w: 0.74, h: 0.36 },
+  set:  { x: 0.13, y: 0.67, w: 0.74, h: 0.08 },
+  text: { x: 0.13, y: 0.76, w: 0.74, h: 0.12 }
+};
+
+function ensureGuideOverlay() {
+  if (guideCanvas) return;
+  guideCanvas = document.createElement("canvas");
+  guideCanvas.id = "guideOverlay";
+  guideCanvas.style.position = "fixed";
+  guideCanvas.style.left = "0";
+  guideCanvas.style.top = "0";
+  guideCanvas.style.width = "100vw";
+  guideCanvas.style.height = "100vh";
+  guideCanvas.style.zIndex = "9999";
+  guideCanvas.style.pointerEvents = "none";
+  guideCanvas.style.display = "none";
+  document.body.appendChild(guideCanvas);
+
+  guideCtx = guideCanvas.getContext("2d");
+  window.addEventListener("resize", redrawGuide);
+  window.addEventListener("scroll", redrawGuide, true);
+}
+
+function roundRect(c, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  c.beginPath();
+  c.moveTo(x + rr, y);
+  c.arcTo(x + w, y, x + w, y + h, rr);
+  c.arcTo(x + w, y + h, x, y + h, rr);
+  c.arcTo(x, y + h, x, y, rr);
+  c.arcTo(x, y, x + w, y, rr);
+  c.closePath();
+}
+
+function strokeBox(c, x, y, w, h, stroke, fill) {
+  if (fill) {
+    c.fillStyle = fill;
+    roundRect(c, x, y, w, h, 12);
+    c.fill();
+  }
+  c.strokeStyle = stroke;
+  c.lineWidth = 2;
+  roundRect(c, x, y, w, h, 12);
+  c.stroke();
+}
+
+function redrawGuide() {
+  if (!guideCanvas || !guideCtx) return;
+
+  guideCanvas.width = Math.max(1, window.innerWidth);
+  guideCanvas.height = Math.max(1, window.innerHeight);
+  guideCtx.clearRect(0, 0, guideCanvas.width, guideCanvas.height);
+
+  const r = video.getBoundingClientRect();
+  if (r.width < 20 || r.height < 20) {
+    guideCanvas.style.display = "none";
+    return;
+  }
+  guideCanvas.style.display = "block";
+
+  const abs = (b) => ({
+    x: r.left + r.width * b.x,
+    y: r.top + r.height * b.y,
+    w: r.width * b.w,
+    h: r.height * b.h
+  });
+
+  const card = abs(GUIDE.card);
+  const name = abs(GUIDE.name);
+  const art  = abs(GUIDE.art);
+  const set  = abs(GUIDE.set);
+  const text = abs(GUIDE.text);
+
+  // Dim only the video rectangle (NOT the whole page)
+  guideCtx.fillStyle = "rgba(0,0,0,0.33)";
+  guideCtx.fillRect(r.left, r.top, r.width, r.height);
+
+  // Clear card window
+  guideCtx.clearRect(card.x, card.y, card.w, card.h);
+
+  // Draw template boxes
+  strokeBox(guideCtx, card.x, card.y, card.w, card.h, "rgba(255,255,255,0.92)", null);
+  strokeBox(guideCtx, name.x, name.y, name.w, name.h, "rgba(0,255,170,0.98)", "rgba(0,255,170,0.10)");
+  strokeBox(guideCtx, art.x, art.y, art.w, art.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
+  strokeBox(guideCtx, set.x, set.y, set.w, set.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
+  strokeBox(guideCtx, text.x, text.y, text.w, text.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
+}
+
 function grabNameStripCanvas() {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
@@ -424,7 +539,12 @@ async function startCamera() {
   await new Promise(resolve => (video.onloadedmetadata = () => resolve()));
   await video.play();
   dbg(`Camera OK (${video.videoWidth}x${video.videoHeight}).`);
+  try { hideTopTitleBar(); } catch {}
+  try { ensureGuideOverlay(); redrawGuide(); } catch {}
+  // Keep template aligned while scanning
+  try { setInterval(() => { if (scanning) redrawGuide(); }, 250); } catch {}
 }
+
 
 // Controls
 startBtn?.addEventListener("click", async () => {
