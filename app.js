@@ -1,6 +1,71 @@
-// Goat Cam - app.js
-// Stable build (no recovery banner). Template overlay is SAFE (dims only inside video rectangle).
+// Goat Cam - app.js (RECOVERY BUILD)
+// Goal: If you are seeing a full black screen with NO UI/debug, this build
+// 1) Forces a visible on-screen banner immediately (before any camera logic)
+// 2) Unregisters any service worker + clears caches (common cause: stuck old broken JS)
+// 3) Disables the template overlay mask entirely until you explicitly re-enable later
+// 4) Adds global error handlers to show an alert even if the page is black
 
+// --- GLOBAL PANIC ERROR HANDLERS ---
+window.addEventListener("error", (e) => {
+  try { alert("JS error: " + (e?.message || e)); } catch {}
+});
+window.addEventListener("unhandledrejection", (e) => {
+  try { alert("Promise error: " + (e?.reason?.message || e?.reason || e)); } catch {}
+});
+
+// --- FORCE A VISIBLE BANNER IMMEDIATELY ---
+(function ensureRecoveryBanner(){
+  try {
+    // Make page not-black even if CSS is weird
+    document.documentElement.style.background = "#fff";
+    document.body.style.background = "#fff";
+    document.body.style.color = "#000";
+
+    const banner = document.createElement("div");
+    banner.id = "recoveryBanner";
+    banner.style.position = "fixed";
+    banner.style.left = "8px";
+    banner.style.top = "8px";
+    banner.style.zIndex = "2147483647";
+    banner.style.padding = "10px 12px";
+    banner.style.borderRadius = "14px";
+    banner.style.background = "rgba(255,255,255,0.92)";
+    banner.style.border = "1px solid rgba(0,0,0,0.15)";
+    banner.style.boxShadow = "0 6px 20px rgba(0,0,0,0.15)";
+    banner.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif";
+    banner.style.fontSize = "14px";
+    banner.style.lineHeight = "1.2";
+    banner.textContent = "RECOVERY BUILD LOADED ✅ (tap)";
+    banner.addEventListener("click", () => {
+      try { alert("Recovery banner is active. If the rest is black, it's likely cached old files / SW / CSS overlay."); } catch {}
+    });
+
+    // Append as early as possible
+    document.addEventListener("DOMContentLoaded", () => {
+      try { document.body.appendChild(banner); } catch {}
+    });
+    // Also append immediately if body already exists
+    if (document.body) document.body.appendChild(banner);
+  } catch {}
+})();
+
+// --- NUKE SERVICE WORKER + CACHES (very common cause of "still black") ---
+(async function nukeSWAndCaches(){
+  try {
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      for (const r of regs) await r.unregister();
+    }
+  } catch {}
+  try {
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      for (const k of keys) await caches.delete(k);
+    }
+  } catch {}
+})();
+
+// ----------------- ORIGINAL APP STARTS HERE -----------------
 // Template overlay is enabled safely (dims only inside the video rectangle).
 
 const video = document.getElementById("video");
@@ -23,27 +88,12 @@ function dbg(msg) {
   try { if (debugEl) debugEl.textContent = msg || ""; } catch {}
 
 
-    }
-  } catch {}
-}
-
-function removeTopBars() {
+function hideTopTitleBar() {
   try {
-    // Remove any old recovery banner/debug if present
-    const rb = document.getElementById("recoveryBanner");
-    if (rb) rb.remove();
-    const fd = document.getElementById("floatingDebug");
-    if (fd) fd.remove();
-  } catch {}
-
-  try {
-    // Hide/remove the "Goat Cam" top bar/title to reclaim space.
-    const candidates = Array.from(document.querySelectorAll("header, h1, h2, div, span"));
-    for (const el of candidates) {
+    const headers = Array.from(document.querySelectorAll("header,h1,h2"));
+    for (const el of headers) {
       const t = (el.textContent || "").trim().toLowerCase();
-      if (!t) continue;
-      if (t === "goat cam" || t.startsWith("goat cam")) {
-        // Hide the element and its header wrapper if any
+      if (t.includes("goat cam")) {
         el.style.display = "none";
         const h = el.closest("header");
         if (h) h.style.display = "none";
@@ -51,16 +101,12 @@ function removeTopBars() {
     }
   } catch {}
 }
-
-document.addEventListener("DOMContentLoaded", () => {
-  removeTopBars();
-  // Run again after first layout (Safari can inject/measure late)
-  setTimeout(removeTopBars, 200);
-  setTimeout(removeTopBars, 600);
-});
-
-
 document.addEventListener("DOMContentLoaded", () => { try { hideTopTitleBar(); } catch {} });
+
+  try {
+    const b = document.getElementById("recoveryBanner");
+    if (b && msg) b.textContent = msg;
+  } catch {}
 }
 
 function setOverlay(state, markText) {
@@ -493,8 +539,7 @@ async function startCamera() {
   await new Promise(resolve => (video.onloadedmetadata = () => resolve()));
   await video.play();
   dbg(`Camera OK (${video.videoWidth}x${video.videoHeight}).`);
-  try { removeTopBars(); } catch {}
-try { hideTopTitleBar(); } catch {}
+  try { hideTopTitleBar(); } catch {}
   try { ensureGuideOverlay(); redrawGuide(); } catch {}
   // Keep template aligned while scanning
   try { setInterval(() => { if (scanning) redrawGuide(); }, 250); } catch {}
