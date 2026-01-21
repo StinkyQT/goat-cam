@@ -25,10 +25,6 @@ const earliestEl = document.getElementById("earliest");
 const ocrTextEl = document.getElementById("ocrText");
 const debugEl = document.getElementById("debug");
 
-
-// ---- Tap-to-freeze additions ----
-let freezeMode = true;            // this build: scan only on button press
-let frozenOnce = false;
 let scanning = false;
 let scanTimer = null;
 
@@ -411,7 +407,7 @@ async function scanOnce() {
 function startScanning() {
   if (scanning) return;
   scanning = true;
-  toggleScanBtn.textContent = "Scan Card / New Card";
+  toggleScanBtn.textContent = "Scan New Card";
 
   const rate = parseInt(scanRateSel.value, 10) || 900;
   dbg(`Scanning every ${rate}ms…`);
@@ -421,7 +417,7 @@ function startScanning() {
 
 function stopScanning() {
   scanning = false;
-  toggleScanBtn.textContent = "Scan Card / New Card";
+  toggleScanBtn.textContent = "Scan New Card";
   if (scanTimer) clearInterval(scanTimer);
   scanTimer = null;
   dbg("Scanning stopped.");
