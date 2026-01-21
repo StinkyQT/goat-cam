@@ -20,16 +20,6 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-
-window.addEventListener("DOMContentLoaded", () => {
-  try {
-    injectGentleCSS();
-    ensureFixedControlsBar();
-  } catch (e) {
-    // ignore
-  }
-});
-
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -78,65 +68,45 @@ const CROP = GUIDE.name;
 
 // ---------------- Gentle layout tweaks ----------------
 function injectGentleCSS() {
-  // Full-screen, device-agnostic layout that avoids scrolling.
-  // Video fills the screen; UI overlays on top; controls live in a fixed bottom bar.
   const css = `
-    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; background: #000; }
-    /* Put the camera behind everything */
+    /* Minimal, screen-fit tweaks (aim: no scrolling both before/after camera permission) */
+    html, body { margin: 0; padding: 0; }
+    /* Make the camera view a bit shorter so the top status area remains visible */
     #video {
-      position: fixed;
-      inset: 0;
-      width: 100vw;
-      height: 100vh;
+      width: 100%;
+      height: 52vh;          /* key change */
+      max-height: 52vh;      /* key change */
       object-fit: cover;
       background: #000;
-      z-index: 1;
+      border-radius: 12px;
     }
-    #canvas { display: none; }
-
-    /* Ensure the rest of the UI is above the video */
-    body > * { position: relative; z-index: 10000; }
-
-    /* Compact text blocks so they never force scroll */
+    /* Compact spacing & text */
     #debug {
-      max-width: calc(100vw - 24px);
+      max-width: 100%;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
       line-height: 1.15;
-      margin: 8px 12px;
+      margin: 6px 10px;
     }
+    #bigMark { margin: 6px 0; }
+    #ocrText, #earliest, #goatPool, #cardName {
+      line-height: 1.12;
+    }
+    /* OCR can be tall; keep it compact */
     #ocrText {
-      max-height: 2.6em;
+      max-height: 2.4em;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    #goatPool, #earliest { max-height: 2.6em; overflow: hidden; text-overflow: ellipsis; }
-    #bigMark { margin: 6px 0; }
-
-    /* Fixed bottom controls bar */
-    #gc-controls {
-      position: fixed;
-      left: 12px; right: 12px;
-      bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
-      z-index: 10002;
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      justify-content: space-between;
-      padding: 10px;
-      border-radius: 14px;
-      background: rgba(0,0,0,0.55);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      box-sizing: border-box;
+    /* Slightly reduce default font sizes on small screens */
+    @media (max-height: 740px) {
+      body { font-size: 14px; }
+      button, select { font-size: 14px; }
     }
-    #gc-controls button, #gc-controls select { font-size: 16px; }
-    #gc-controls button { flex: 1; }
-    #gc-controls select { width: 42%; }
+    /* iPhone safe-area breathing room */
+    body { padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 10px); }
 
-    /* Give the upper UI some space so it doesn't hide behind the controls */
-    body { padding-bottom: 120px; box-sizing: border-box; }
   `;
   const style = document.createElement("style");
   style.textContent = css;
@@ -183,26 +153,6 @@ function nudgeControlsUp(px = 14) {
 
   // If it was at the very bottom with margins, this helps on some iPhones.
   row.style.marginBottom = "0";
-}
-
-function ensureFixedControlsBar() {
-  // Create a bottom bar once, and move the existing controls into it.
-  // Moving nodes preserves their event listeners.
-  if (document.getElementById("gc-controls")) return;
-  if (!startBtn || !toggleScanBtn || !scanRateSel) return;
-
-  const bar = document.createElement("div");
-  bar.id = "gc-controls";
-
-  // Put controls in a consistent order
-  bar.appendChild(startBtn);
-  bar.appendChild(scanRateSel);
-  bar.appendChild(toggleScanBtn);
-
-  document.body.appendChild(bar);
-
-  // Ensure correct label
-  toggleScanBtn.textContent = "Scan New Card";
 }
 
 // ---------------- helpers ----------------
@@ -460,9 +410,6 @@ async function startCamera() {
   await new Promise((resolve) => (video.onloadedmetadata = () => resolve()));
   await video.play();
 
-
-  // Ensure template overlay is always visible
-  try { ensureGuideOverlay(); redrawGuide(); } catch (e) {}
   ensureGuideOverlay();
   redrawGuide();
   dbg("Camera OK. Scanning…");
@@ -538,6 +485,80 @@ function redrawGuide() {
   strokeBox(guideCtx, art.x, art.y, art.w, art.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
   strokeBox(guideCtx, set.x, set.y, set.w, set.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
   strokeBox(guideCtx, text.x, text.y, text.w, text.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
+}
+
+
+// ---------------- Tap-to-freeze support ----------------
+let freezeLayer = null;
+let isFrozen = false;
+
+// Create a canvas that sits EXACTLY over the video element (not fullscreen) so it won't cover your UI.
+function ensureFreezeLayer() {
+  if (freezeLayer) return;
+  freezeLayer = document.createElement("canvas");
+  freezeLayer.id = "freezeLayer";
+  freezeLayer.style.position = "fixed";
+  freezeLayer.style.pointerEvents = "none";
+  freezeLayer.style.zIndex = "2"; // above video, below guide overlay (guide is 9999)
+  freezeLayer.style.display = "none";
+  document.body.appendChild(freezeLayer);
+
+  window.addEventListener("resize", () => { if (isFrozen) drawFrozenFrame(); });
+  window.addEventListener("scroll", () => { if (isFrozen) drawFrozenFrame(); }, true);
+}
+
+function drawFrozenFrame() {
+  if (!freezeLayer) return false;
+  if (!video.videoWidth || !video.videoHeight) return false;
+
+  const r = video.getBoundingClientRect();
+  if (r.width < 10 || r.height < 10) return false;
+
+  // Position the freeze canvas over the displayed video element
+  freezeLayer.style.left = `${r.left}px`;
+  freezeLayer.style.top = `${r.top}px`;
+  freezeLayer.style.width = `${r.width}px`;
+  freezeLayer.style.height = `${r.height}px`;
+
+  // Real backing size for crisp draw
+  freezeLayer.width = Math.max(1, Math.round(r.width * devicePixelRatio));
+  freezeLayer.height = Math.max(1, Math.round(r.height * devicePixelRatio));
+
+  const c = freezeLayer.getContext("2d");
+  c.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+
+  // Draw the same *visible* portion of the video that the element is showing (object-fit aware)
+  const vis = getVisibleSourceRect();
+  if (!vis) return false;
+
+  const sx = vis.offsetX;
+  const sy = vis.offsetY;
+  const sw = vis.visibleW;
+  const sh = vis.visibleH;
+
+  c.clearRect(0, 0, r.width, r.height);
+  c.drawImage(video, sx, sy, sw, sh, 0, 0, r.width, r.height);
+
+  freezeLayer.style.display = "block";
+  return true;
+}
+
+function freezePreview() {
+  ensureFreezeLayer();
+  const ok = drawFrozenFrame();
+  if (!ok) return false;
+  // Hide live video visually, but keep stream alive
+  video.style.opacity = "0";
+  isFrozen = true;
+  try { redrawGuide(); } catch (e) {}
+  return true;
+}
+
+function unfreezePreview() {
+  if (freezeLayer) freezeLayer.style.display = "none";
+  video.style.opacity = "1";
+  isFrozen = false;
+  try { redrawGuide(); } catch (e) {}
 }
 
 // ---------------- object-fit aware crop mapping ----------------
@@ -826,14 +847,9 @@ async function scanOnce() {
       ? (resolved.exact ? "LOCKED (exact match)" : `LOCKED (${resolved.method}, score ${resolved.score.toFixed(2)})`)
       : `Matched (${resolved.method}, score ${resolved.score.toFixed(2)})`;
 
-    // HYBRID anti-flicker: only paint full results when we lock.
-// Otherwise, show OCR + a steady "reading" message.
-if (lockedNow) {
-  applyCardToUI(resolved.card, method, textForUse);
-} else {
-  if (ocrTextEl) ocrTextEl.textContent = textForUse || "";
-  dbg("Reading… hold steady (waiting to lock)");
-}} catch (e) {
+    applyCardToUI(resolved.card, method, textForUse);
+
+  } catch (e) {
     console.error(e);
     resetUI(`ERROR: ${e.message || e}`);
   } finally {
@@ -842,24 +858,10 @@ if (lockedNow) {
 }
 
 function startAutoScanning() {
-  if (scanning) return;
+  // Tap-to-freeze build: no continuous OCR (prevents flicker + guessing)
   scanning = true;
-
-  const rate = parseInt(scanRateSel?.value, 10) || 900;
-
-  // Ensure correct UX text
-  if (toggleScanBtn) toggleScanBtn.textContent = "Scan New Card";
-
-  dbg(`Auto-scanning every ${rate}ms… (locks on exact match)`);
-
-  scanTimer = setInterval(() => {
-    if (isLockedActive()) return;
-    scanOnce();
-  }, rate);
-
-  ocrBuffer = [];
-  scanOnce();
-  setTimeout(() => { if (scanning && !isLockedActive()) scanOnce(); }, 220);
+  if (toggleScanBtn) toggleScanBtn.textContent = "Scan Card / New Card";
+  dbg("Ready. Line up card in the template, then tap Scan Card.");
 }
 
 function stopAutoScanning() {
@@ -870,9 +872,8 @@ function stopAutoScanning() {
 
 // ---------------- Boot ----------------
 async function initAll() {
-  // Full-screen, device-agnostic layout
+  // Gentle layout changes (no DOM moving / no fullscreen forcing)
   injectGentleCSS();
-  ensureFixedControlsBar();
 
   dbg("Loading data…");
   setsRelease = await loadJSON("data/sets_release_dates.json");
@@ -880,6 +881,12 @@ async function initAll() {
   goatPoolCfg = await loadJSON("data/goat_pool_cutoff.json");
 
   await startCamera();
+    try { ensureFreezeLayer(); } catch (e) {}
+
+  // After camera is running, nudge controls slightly so you don't need to scroll
+  // (Do it now and again shortly after, since iOS can change layout after permission prompts)
+  nudgeControlsUp(14);
+  setTimeout(() => nudgeControlsUp(14), 250);
 
   startBtn.textContent = "Camera Ready";
   resetUI("Align card in rectangle; name in green box. Scanning…");
@@ -906,8 +913,36 @@ startBtn.addEventListener("click", async () => {
 
 // Scan New Card button (clears lock + immediately scans)
 toggleScanBtn.addEventListener("click", async () => {
-  clearLockAndBuffers();
-  resetUI("Scan new card…");
-  if (!scanning) startAutoScanning();
+  // If we already locked a result, clear everything for the next card
+  if (locked && locked.card) {
+    try { clearLockAndBuffers(); } catch (e) {}
+    locked = null;
+    lastCandidate = null;
+    ocrBuffer = [];
+    matchCooldownUntil = 0;
+    unfreezePreview();
+    resetUI("Scan new card…");
+    dbg("Ready. Line up card in the template, then tap Scan Card.");
+    return;
+  }
+
+  // Freeze the preview so the name strip doesn't 'wiggle' frame to frame
+  const froze = freezePreview();
+  if (!froze) {
+    resetUI("Camera not ready yet.");
+    return;
+  }
+
+  // Run ONE scan attempt (reuses your existing OCR + match pipeline)
   await scanOnce();
+
+  // If scanOnce matched, make it permanent (stay frozen until you clear)
+  if (locked && locked.card) {
+    locked.permanent = true;
+    locked.unlockAt = Date.now();
+    dbg("LOCKED. Tap again for new card.");
+  } else {
+    // Leave preview frozen so you can tap again after adjusting without moving the card
+    dbg("No match. Reduce glare / adjust angle, then tap again.");
+  }
 });
