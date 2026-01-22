@@ -25,9 +25,9 @@ async function resetServiceWorkerAndCaches() {
   } catch {}
 }
 
-// (Dev convenience) Attempt to unregister any existing Service Worker + clear CacheStorage.
-// This prevents Safari from "holding onto" older builds while you iterate.
+// Run reset ASAP (normal tabs are often stuck on old SW assets)
 resetServiceWorkerAndCaches();
+
 // ----------------- APP -----------------
 const video = document.getElementById("video");
 const startBtn = document.getElementById("startBtn");
@@ -73,7 +73,6 @@ function resetUI(reason) {
 }
 
 function removeTopBars() {
-  // Hide any legacy "Goat Cam" headers/banners that might exist in older builds.
   try {
     const candidates = Array.from(document.querySelectorAll("header, h1, h2, div, span"));
     for (const el of candidates) {
@@ -84,100 +83,66 @@ function removeTopBars() {
         const h = el.closest("header");
         if (h) h.style.display = "none";
       }
-    }
-  } catch {}
-}
+
 
 function injectPrettyStyles() {
   if (document.getElementById("prettyStyles")) return;
   const style = document.createElement("style");
   style.id = "prettyStyles";
   style.textContent = `
-    :root {
-      --gc-border: rgba(0,0,0,.12);
-      --gc-shadow: 0 10px 25px rgba(0,0,0,.14);
-    }
-
-    /* Treat this like an app shell: no page scrolling */
-    html, body {
-      height: 100%;
-      margin: 0 !important;
-      overflow: hidden !important;
-      overscroll-behavior: none !important;
-    }
-    * { box-sizing: border-box; }
-
-    /* Layout hardening */
-    #app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
-    #videoWrap { flex: 1 1 auto; min-height: 0; position: relative; background:#000; }
-    #video { width: 100%; height: 100%; object-fit: cover; background:#000; display:block; }
-
-    /* Button + select styling (safe overrides) */
+    :root { --gc-border: rgba(0,0,0,.12); --gc-shadow: 0 10px 25px rgba(0,0,0,.14); }
+    /* Force-clean button style (override any existing CSS) */
     #startBtn, #toggleScanBtn {
       appearance: none !important;
       -webkit-appearance: none !important;
       border: 1px solid var(--gc-border) !important;
       border-radius: 999px !important;
-      padding: clamp(10px, 1.5vh, 14px) clamp(12px, 2vw, 16px) !important;
+      padding: 12px 14px !important;
       font-weight: 800 !important;
-      font-size: clamp(14px, 1.9vh, 16px) !important;
+      font-size: 16px !important;
       line-height: 1 !important;
       box-shadow: 0 6px 18px rgba(0,0,0,.10) !important;
       background: #ffffff !important;
       color: #111 !important;
-      min-height: 44px !important;
+      -webkit-tap-highlight-color: transparent !important;
     }
-    #startBtn:disabled { opacity: .65 !important; box-shadow: none !important; }
-
+    #startBtn:disabled {
+      opacity: .65 !important;
+      box-shadow: none !important;
+    }
     #scanRate {
       border: 1px solid var(--gc-border) !important;
       border-radius: 999px !important;
-      padding: clamp(9px, 1.3vh, 12px) clamp(10px, 1.6vw, 14px) !important;
+      padding: 10px 12px !important;
       font-weight: 700 !important;
-      font-size: clamp(13px, 1.7vh, 14px) !important;
+      font-size: 14px !important;
       background: #ffffff !important;
       color: #111 !important;
-      min-height: 44px !important;
     }
 
-    /* Make the controls area a dense responsive grid (works with your index.html) */
-    #controls {
-      display: grid !important;
-      grid-template-columns: 1fr 1fr !important;
+    /* Fixed bottom tray that always fits on iPhone */
+    #gcTray {
+      position: fixed !important;
+      left: 0 !important;
+      right: 0 !important;
+      bottom: 0 !important;
+      z-index: 9998 !important; /* below overlay canvas (9999) */
+      padding: 10px 12px calc(10px + env(safe-area-inset-bottom)) !important;
+      backdrop-filter: blur(10px) !important;
+      -webkit-backdrop-filter: blur(10px) !important;
+      background: rgba(255,255,255,.90) !important;
+      border-top: 1px solid rgba(0,0,0,.08) !important;
+    }
+    #gcTrayRow {
+      display: flex !important;
       gap: 10px !important;
       align-items: center !important;
-      padding: 10px !important;
-      max-height: 32dvh !important;
-      overflow: hidden !important;
     }
-    #controls .chk {
-      grid-column: 1 / -1 !important;
-      display: inline-flex !important;
-      gap: 8px !important;
-      justify-content: center !important;
-      align-items: center !important;
-      flex-wrap: wrap !important;
-      white-space: nowrap !important;
-    }
-    #debug {
-      grid-column: 1 / -1 !important;
-      white-space: nowrap !important;
-      overflow: hidden !important;
-      text-overflow: ellipsis !important;
-    }
-    @media (min-width: 520px) {
-      #controls { grid-template-columns: 1fr 1fr auto !important; }
-      #controls .chk { grid-column: auto !important; justify-self: end !important; }
-    }
+    #gcTrayRow > * { flex: 1 1 auto !important; }
+    #gcTrayRow #scanRate { flex: 0.9 1 auto !important; }
 
-    /* Ensure the video is actually visible and fills its container */
-    #video {
-      display: block !important;
-      width: 100% !important;
-      height: 100% !important;
-      object-fit: cover !important;
-      background: #000 !important;
-    }
+    /* Prevent accidental body padding from causing extra scroll */
+    body { overflow-x: hidden !important; }
   `;
   document.head.appendChild(style);
 }
@@ -186,51 +151,64 @@ function beautifyControlsAndFit() {
   try { injectPrettyStyles(); } catch {}
   try { removeTopBars(); } catch {}
 
-  // Controls overlay (does not affect video sizing)
-  const applyControlsOverlay = () => {
+  const btnA = document.getElementById("startBtn");
+  const btnB = document.getElementById("toggleScanBtn");
+  const rate = document.getElementById("scanRate");
+  if (!btnA || !btnB || !video) return;
+
+  // Create a fixed tray once, then move controls into it.
+  let tray = document.getElementById("gcTray");
+  let row = document.getElementById("gcTrayRow");
+  if (!tray) {
+    tray = document.createElement("div");
+    tray.id = "gcTray";
+    row = document.createElement("div");
+    row.id = "gcTrayRow";
+    tray.appendChild(row);
+    document.body.appendChild(tray);
+  }
+  if (!row) {
+    row = document.createElement("div");
+    row.id = "gcTrayRow";
+    tray.appendChild(row);
+  }
+
+  // Move controls into tray row (preserve order)
+  const toMove = [btnA, btnB, rate].filter(Boolean);
+  for (const el of toMove) {
     try {
-      const controls = document.getElementById("controls");
-      if (!controls) return;
+      if (el && el.parentElement !== row) row.appendChild(el);
+    } catch {}
+  }
 
-      // If CSS already handles it (from index.html), this is harmless; we just ensure it sticks.
-      controls.style.position = "fixed";
-      controls.style.left = "0";
-      controls.style.right = "0";
-      controls.style.bottom = "0";
-      controls.style.zIndex = "9998";
-
-      // Measure height so overlay text doesn't hide under controls.
-      const h = controls.getBoundingClientRect().height || controls.offsetHeight || 0;
-      document.documentElement.style.setProperty("--controls-h", `${Math.ceil(h)}px`);
+  // Fit video so NO scroll is needed: max-height = viewport - tray height - small margin.
+  const doFit = () => {
+    try {
+      const trayH = tray.getBoundingClientRect().height || 0;
+      const margin = 14;
+      const maxH = Math.max(220, Math.floor(window.innerHeight - trayH - margin));
+      video.style.maxHeight = maxH + "px";
+      video.style.width = "100%";
+      video.style.height = "auto";
+      // If still overflowing, jump back to top
+      if (document.documentElement.scrollHeight - window.innerHeight > 6) {
+        window.scrollTo(0, 0);
+      }
     } catch {}
   };
 
-  // On some browsers, layout settles after permission prompt. Nudge a few reflows.
-  const nudge = () => {
-    try {
-      if (document.documentElement.scrollTop || document.body.scrollTop) window.scrollTo(0, 0);
-      applyControlsOverlay();
-
-      // Force guide overlay to re-measure once the video has real dimensions.
-      if (guideCanvas) redrawGuide();
-    } catch {}
-  };
-
-  nudge();
-  window.addEventListener("resize", nudge, { passive: true });
-  window.visualViewport?.addEventListener?.("resize", nudge, { passive: true });
-  window.addEventListener("orientationchange", () => setTimeout(nudge, 250), { passive: true });
-  setTimeout(nudge, 200);
+  doFit();
+  window.addEventListener("resize", doFit);
+  window.addEventListener("orientationchange", () => setTimeout(doFit, 250));
+  setTimeout(doFit, 200);
+  setTimeout(doFit, 600);
 }
 
-
-// Keep behavior stable: clean up banners/tray as soon as DOM exists,
-// and again shortly after in case the page injects/rehydrates elements.
-document.addEventListener("DOMContentLoaded", () => {
-  try { removeTopBars(); } catch {}
-  try { beautifyControlsAndFit(); } catch {}
-  setTimeout(() => { try { removeTopBars(); } catch {} try { beautifyControlsAndFit(); } catch {} }, 250);
-});
+    }
+  } catch {}
+}
+document.addEventListener("DOMContentLoaded", () => { removeTopBars();
+  try { beautifyControlsAndFit(); } catch (e) {} setTimeout(removeTopBars, 250); try { beautifyControlsAndFit(); } catch (e) {} });
 // Data
 async function loadJSON(path) {
   const r = await fetch(path, { cache: "no-store" });
@@ -470,25 +448,20 @@ function grabNameStripCanvas() {
 }
 function preprocessBW(srcCanvas) {
   const w = srcCanvas.width, h = srcCanvas.height;
-  const scale = 2.6; // slightly higher to help thin/bright title fonts like MST
+  const scale = 2.4;
   const out = document.createElement("canvas");
   out.width = Math.max(1, Math.round(w * scale));
   out.height = Math.max(1, Math.round(h * scale));
   const o = out.getContext("2d");
   o.imageSmoothingEnabled = true;
   o.drawImage(srcCanvas, 0, 0, out.width, out.height);
-
   const img = o.getImageData(0, 0, out.width, out.height);
   const d = img.data;
 
-  // Simple global threshold. Works well for black text on light, but
-  // some titles (e.g., white lettering) benefit from trying an inverted pass too.
   let sum = 0;
   for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
   const mean = sum / (d.length / 4);
-
-  // Slightly less aggressive threshold than before (mean*0.90 could drop thin bright strokes).
-  const thr = Math.max(70, Math.min(190, mean * 0.85));
+  const thr = Math.max(80, Math.min(180, mean * 0.90));
 
   for (let i = 0; i < d.length; i += 4) {
     const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
@@ -500,23 +473,137 @@ function preprocessBW(srcCanvas) {
   return out;
 }
 
-function invertBWCanvas(bwCanvas) {
+function invertCanvas(srcCanvas) {
   const out = document.createElement("canvas");
-  out.width = bwCanvas.width;
-  out.height = bwCanvas.height;
+  out.width = srcCanvas.width;
+  out.height = srcCanvas.height;
   const ctx = out.getContext("2d");
-  ctx.drawImage(bwCanvas, 0, 0);
+  ctx.drawImage(srcCanvas, 0, 0);
   const img = ctx.getImageData(0, 0, out.width, out.height);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
-    const v = d[i]; // 0 or 255
-    const inv = 255 - v;
-    d[i] = d[i + 1] = d[i + 2] = inv;
-    d[i + 3] = 255;
+    d[i] = 255 - d[i];
+    d[i + 1] = 255 - d[i + 1];
+    d[i + 2] = 255 - d[i + 2];
   }
   ctx.putImageData(img, 0, 0);
   return out;
 }
+
+function preprocessGrayContrast(srcCanvas) {
+  // Grayscale + contrast stretch (keeps anti-aliased edges; sometimes reads better than hard B/W)
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const scale = 2.4;
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(w * scale));
+  out.height = Math.max(1, Math.round(h * scale));
+  const o = out.getContext("2d");
+  o.imageSmoothingEnabled = true;
+  o.drawImage(srcCanvas, 0, 0, out.width, out.height);
+
+  const img = o.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+
+  // Find min/max gray (ignore extreme outliers lightly)
+  let gMin = 255, gMax = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    if (g < gMin) gMin = g;
+    if (g > gMax) gMax = g;
+  }
+  // Prevent divide-by-zero
+  const span = Math.max(1, gMax - gMin);
+  const boost = 255 / span;
+
+  for (let i = 0; i < d.length; i += 4) {
+    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    const ng = Math.max(0, Math.min(255, (g - gMin) * boost));
+    d[i] = d[i + 1] = d[i + 2] = ng;
+    d[i + 3] = 255;
+  }
+  o.putImageData(img, 0, 0);
+  return out;
+}
+
+function preprocessBWOtsu(srcCanvas, invert = false) {
+  // Otsu thresholding often handles light-on-dark title bars better than a single mean-based threshold.
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const scale = 2.4;
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(w * scale));
+  out.height = Math.max(1, Math.round(h * scale));
+  const o = out.getContext("2d");
+  o.imageSmoothingEnabled = true;
+  o.drawImage(srcCanvas, 0, 0, out.width, out.height);
+
+  const img = o.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+
+  // Histogram
+  const hist = new Array(256).fill(0);
+  const n = d.length / 4;
+  for (let i = 0; i < d.length; i += 4) {
+    const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+    hist[g]++;
+  }
+
+  // Otsu
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * hist[t];
+
+  let sumB = 0, wB = 0, wF = 0;
+  let varMax = 0, threshold = 128;
+
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    wF = n - wB;
+    if (wF === 0) break;
+
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+
+    const varBetween = wB * wF * (mB - mF) * (mB - mF);
+    if (varBetween > varMax) {
+      varMax = varBetween;
+      threshold = t;
+    }
+  }
+
+  for (let i = 0; i < d.length; i += 4) {
+    const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+    let v = g > threshold ? 255 : 0;
+    if (invert) v = 255 - v;
+    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+  o.putImageData(img, 0, 0);
+  return out;
+}
+
+function grabNameStripCanvasVariant(dy = 0, dh = 0) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const vis = getVisibleSourceRect();
+  if (!vis) return null;
+
+  let sx = Math.floor(vis.offsetX + vis.visibleW * CROP.x);
+  let sy = Math.floor(vis.offsetY + vis.visibleH * (CROP.y + dy));
+  let sw = Math.floor(vis.visibleW * CROP.w);
+  let sh = Math.floor(vis.visibleH * (CROP.h + dh));
+
+  sx = Math.max(0, Math.min(vw - 1, sx));
+  sy = Math.max(0, Math.min(vh - 1, sy));
+  sw = Math.max(1, Math.min(vw - sx, sw));
+  sh = Math.max(1, Math.min(vh - sy, sh));
+
+  const c = document.createElement("canvas");
+  c.width = sw; c.height = sh;
+  c.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+  return c;
+}
+
 
 // UI apply + locking
 function applyCardToUI(card, methodText, ocrText) {
@@ -552,63 +639,83 @@ async function scanOnce() {
   if (scanBusy || locked) return;
   scanBusy = true;
   try {
+    // Base crop
     const strip = grabNameStripCanvas();
     if (!strip) { dbg("Camera not ready…"); return; }
 
-    const bw = preprocessBW(strip);
+    const tryOCR = async (canvas, label) => {
+      const data = await ocrWithWorker(canvas);
+      const cleaned = cleanOCR(data.text);
+      return { cleaned, label };
+    };
 
-    // Pass 1: normal BW
-    const data1 = await ocrWithWorker(bw);
-    const cleaned1 = cleanOCR(data1.text);
+    // Pass 1: original mean-threshold BW (best for most monster titles)
+    const bw1 = preprocessBW(strip);
+    let { cleaned, label } = await tryOCR(bw1, "bw");
+    if (ocrTextEl) ocrTextEl.textContent = cleaned || "";
 
-    if (looksTooPartial(cleaned1)) {
-      // Some cards have white title text; try inverted before giving up.
-      const inv = invertBWCanvas(bw);
-      const data2 = await ocrWithWorker(inv);
-      const cleaned2 = cleanOCR(data2.text);
+    if (!looksTooPartial(cleaned)) {
+      const resolved = await resolveCardFromOCR(cleaned);
+      if (resolved.card) {
+        if (resolved.exact) { lockResult(resolved.card, "exact", cleaned); return; }
 
-      const chosen = cleaned2 && cleaned2.length > (cleaned1 || "").length ? cleaned2 : cleaned1;
-      if (ocrTextEl) ocrTextEl.textContent = chosen || "";
-
-      if (looksTooPartial(chosen)) { dbg("Too little title text — reduce glare."); return; }
-
-      const resolved2 = await resolveCardFromOCR(chosen);
-      if (!resolved2.card) { dbg("No confident match."); return; }
-
-      // same stability logic below, using resolved2
-      if (resolved2.exact) { lockResult(resolved2.card, "exact", chosen); return; }
-
-      if (!lastCandidate || lastCandidate.id !== resolved2.card.id) {
-        lastCandidate = { id: resolved2.card.id, seen: 1, best: resolved2.score };
+        if (!lastCandidate || lastCandidate.id !== resolved.card.id) {
+          lastCandidate = { id: resolved.card.id, seen: 1, best: resolved.score };
+          dbg("Matching… hold steady");
+          return;
+        }
+        lastCandidate.seen += 1;
+        lastCandidate.best = Math.min(lastCandidate.best, resolved.score);
+        if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.35) {
+          lockResult(resolved.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, cleaned);
+          return;
+        }
         dbg("Matching… hold steady");
         return;
       }
-      lastCandidate.seen += 1;
-      lastCandidate.best = Math.min(lastCandidate.best, resolved2.score);
-      if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.33) {
-        lockResult(resolved2.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, chosen);
-        return;
-      }
-      dbg("Matching… hold steady");
-      return;
     }
 
-    if (ocrTextEl) ocrTextEl.textContent = cleaned1 || "";
+    // Only fall back if we couldn't get a confident match.
+    // This keeps Burstinatrix/UFO Turtle performance the same.
+    const attempts = [];
 
-    const resolved1 = await resolveCardFromOCR(cleaned1);
-    if (!resolved1.card) {
-      // Pass 2: inverted BW (helps white lettering / dark title bars)
-      const inv = invertBWCanvas(bw);
-      const data2 = await ocrWithWorker(inv);
-      const cleaned2 = cleanOCR(data2.text);
-      if (ocrTextEl) ocrTextEl.textContent = cleaned2 || cleaned1 || "";
+    // Pass 2: Otsu BW (often better on gradients / non-uniform title bars)
+    attempts.push(async () => {
+      const bw = preprocessBWOtsu(strip, false);
+      return await tryOCR(bw, "otsu");
+    });
 
-      if (looksTooPartial(cleaned2)) { dbg("No confident match."); return; }
+    // Pass 3: Otsu inverted BW (helps white lettering on dark title bars like many Spell/Trap names)
+    attempts.push(async () => {
+      const bw = preprocessBWOtsu(strip, true);
+      return await tryOCR(bw, "otsu-inv");
+    });
+
+    // Pass 4: slightly taller/shifted crop (some spell/trap frames sit a hair different)
+    attempts.push(async () => {
+      const strip2 = grabNameStripCanvasVariant(-0.02, 0.05);
+      if (!strip2) return { cleaned: "", label: "shift" };
+      const bw = preprocessBWOtsu(strip2, true);
+      return await tryOCR(bw, "shift-otsu-inv");
+    });
+
+    // Pass 5: grayscale + contrast (sometimes Tesseract likes anti-aliased edges)
+    attempts.push(async () => {
+      const g = preprocessGrayContrast(strip);
+      return await tryOCR(g, "gray");
+    });
+
+    for (const fn of attempts) {
+      const out = await fn();
+      const cleaned2 = out.cleaned || "";
+      if (ocrTextEl) ocrTextEl.textContent = cleaned2;
+
+      if (looksTooPartial(cleaned2)) continue;
 
       const resolved2 = await resolveCardFromOCR(cleaned2);
-      if (!resolved2.card) { dbg("No confident match."); return; }
+      if (!resolved2.card) continue;
 
-      if (resolved2.exact) { lockResult(resolved2.card, "exact", cleaned2); return; }
+      if (resolved2.exact) { lockResult(resolved2.card, `exact (${out.label})`, cleaned2); return; }
 
       if (!lastCandidate || lastCandidate.id !== resolved2.card.id) {
         lastCandidate = { id: resolved2.card.id, seen: 1, best: resolved2.score };
@@ -617,28 +724,16 @@ async function scanOnce() {
       }
       lastCandidate.seen += 1;
       lastCandidate.best = Math.min(lastCandidate.best, resolved2.score);
-      if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.33) {
-        lockResult(resolved2.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, cleaned2);
+      if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.35) {
+        lockResult(resolved2.card, `fuzzy ${lastCandidate.best.toFixed(2)} (${out.label})`, cleaned2);
         return;
       }
       dbg("Matching… hold steady");
       return;
     }
 
-    if (resolved1.exact) { lockResult(resolved1.card, "exact", cleaned1); return; }
-
-    if (!lastCandidate || lastCandidate.id !== resolved1.card.id) {
-      lastCandidate = { id: resolved1.card.id, seen: 1, best: resolved1.score };
-      dbg("Matching… hold steady");
-      return;
-    }
-    lastCandidate.seen += 1;
-    lastCandidate.best = Math.min(lastCandidate.best, resolved1.score);
-    if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.33) {
-      lockResult(resolved1.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, cleaned1);
-      return;
-    }
-    dbg("Matching… hold steady");
+    // If we reach here, nothing worked
+    dbg("No confident match — try less glare + hold steady.");
   } finally { scanBusy = false; }
 }
 
@@ -656,8 +751,6 @@ function startAutoScanning() {
 
 async function startCamera() {
   dbg("Requesting camera…");
-
-  // Ensure iOS plays inline and doesn't force fullscreen
   try {
     video.setAttribute("playsinline", "");
     video.setAttribute("webkit-playsinline", "");
@@ -666,86 +759,36 @@ async function startCamera() {
     video.autoplay = true;
   } catch {}
 
-  const constraints = {
+  const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
     audio: false
-  };
-
-  const stream = await navigator.mediaDevices.getUserMedia(constraints);
-  video.srcObject = stream;
-
-  // Wait for real dimensions (metadata can be racy on iOS)
-  await new Promise((resolve, reject) => {
-    const done = () => {
-      cleanup();
-      resolve();
-    };
-    const fail = () => {
-      cleanup();
-      reject(new Error("Camera metadata timeout"));
-    };
-    const cleanup = () => {
-      clearTimeout(to);
-      video.removeEventListener("loadedmetadata", done);
-      video.removeEventListener("loadeddata", done);
-    };
-
-    // If already ready, resolve immediately
-    if (video.readyState >= 1 && video.videoWidth > 0 && video.videoHeight > 0) return resolve();
-
-    video.addEventListener("loadedmetadata", done, { once: true });
-    video.addEventListener("loadeddata", done, { once: true });
-
-    const to = setTimeout(fail, 3500);
   });
-
-  // Try to play (retry a couple times)
-  for (let i = 0; i < 3; i++) {
-    try {
-      await video.play();
-      break;
-    } catch (e) {
-      await new Promise(r => setTimeout(r, 200));
-    }
-  }
-
-  // Make sure video always has visible size
+  video.srcObject = stream;
+  await new Promise(resolve => (video.onloadedmetadata = () => resolve()));
   try {
-    video.style.width = "100%";
-    video.style.height = "100%";
-    video.style.objectFit = "cover";
-    video.style.background = "#000";
-  } catch {}
-
-  try { removeTopBars(); } catch {}
-  try { beautifyControlsAndFit(); } catch {}
-  try { ensureGuideOverlay(); redrawGuide(); } catch {}
-
-  dbg(`Camera OK (${video.videoWidth || "?"}x${video.videoHeight || "?"}).`);
+    await video.play();
+  } catch {
+    await new Promise(r => setTimeout(r, 200));
+    await video.play();
+  }
+  removeTopBars();
+  try { beautifyControlsAndFit(); } catch (e) {}
+  ensureGuideOverlay();
+  redrawGuide();
+  dbg(`Camera OK (${video.videoWidth}x${video.videoHeight}).`);
 }
 
 // Controls
 startBtn?.addEventListener("click", async () => {
-  // iOS Safari can be picky: start the camera ASAP (within the tap gesture),
-  // then load JSON in parallel.
   startBtn.disabled = true;
-  startBtn.textContent = "Starting…";
+  startBtn.textContent = "Loading…";
   try {
-    resetUI("Starting camera…");
-
-    const dataPromise = (async () => {
-      // Load data (no-store) while camera spins up
-      setsRelease = await loadJSON("data/sets_release_dates.json");
-      goatBanlist = await loadJSON("data/goat_banlist_2005_04.json");
-      goatPoolCfg = await loadJSON("data/goat_pool_cutoff.json");
-    })();
+    resetUI("Loading data…");
+    setsRelease = await loadJSON("data/sets_release_dates.json");
+    goatBanlist = await loadJSON("data/goat_banlist_2005_04.json");
+    goatPoolCfg = await loadJSON("data/goat_pool_cutoff.json");
 
     await startCamera();
-
-    // Wait for data (if still loading)
-    resetUI("Loading data…");
-    await dataPromise;
-
     startBtn.textContent = "Camera Ready";
     resetUI("Line up card title and hold steady.");
     startAutoScanning();
@@ -757,6 +800,7 @@ startBtn?.addEventListener("click", async () => {
     dbg("Failed to start camera.");
   }
 });
+
 toggleScanBtn?.addEventListener("click", async () => {
   locked = null;
   lastCandidate = null;
