@@ -486,48 +486,38 @@ async function grabNameStripCanvas() {
 }
 
 async function grabNameStripCanvasVariant(crop) {
-  const frame = await grabFrameBitmap();
-  if (!frame) return null;
-
-  let vw, vh;
-  if (frame instanceof HTMLCanvasElement) {
-    vw = frame.width; vh = frame.height;
-  } else {
-    vw = frame.width; vh = frame.height;
-  }
-  if (!vw || !vh) {
-    try { if (frame && typeof frame.close === "function") frame.close(); } catch {}
-    return null;
-  }
-
-  const vis = getVisibleSourceRect();
-  if (!vis) {
-    try { if (frame && typeof frame.close === "function") frame.close(); } catch {}
-    return null;
-  }
-
-  let sx = Math.floor(vis.offsetX + vis.visibleW * crop.x);
-  let sy = Math.floor(vis.offsetY + vis.visibleH * crop.y);
-  let sw = Math.floor(vis.visibleW * crop.w);
-  let sh = Math.floor(vis.visibleH * crop.h);
-
-  sx = Math.max(0, Math.min(vw - 1, sx));
-  sy = Math.max(0, Math.min(vh - 1, sy));
-  sw = Math.max(1, Math.min(vw - sx, sw));
-  sh = Math.max(1, Math.min(vh - sy, sh));
-
-  const c = document.createElement("canvas");
-  c.width = sw; c.height = sh;
+  let frame = null;
   try {
+    frame = await grabFrameBitmap();
+    if (!frame) return null;
+
+    const vw = frame.width, vh = frame.height;
+    if (!vw || !vh) return null;
+
+    const vis = getVisibleSourceRect();
+    if (!vis) return null;
+
+    let sx = Math.floor(vis.offsetX + vis.visibleW * crop.x);
+    let sy = Math.floor(vis.offsetY + vis.visibleH * crop.y);
+    let sw = Math.floor(vis.visibleW * crop.w);
+    let sh = Math.floor(vis.visibleH * crop.h);
+
+    sx = Math.max(0, Math.min(vw - 1, sx));
+    sy = Math.max(0, Math.min(vh - 1, sy));
+    sw = Math.max(1, Math.min(vw - sx, sw));
+    sh = Math.max(1, Math.min(vh - sy, sh));
+
+    const c = document.createElement("canvas");
+    c.width = sw; c.height = sh;
+
     const ctx = c.getContext("2d");
     ctx.drawImage(frame, sx, sy, sw, sh, 0, 0, sw, sh);
+    return c;
   } catch (e) {
+    return null;
+  } finally {
     try { if (frame && typeof frame.close === "function") frame.close(); } catch {}
-    throw e;
   }
-
-  try { if (frame && typeof frame.close === "function") frame.close(); } catch {}
-  return c;
 }
 
 function getFallbackCrops() {
@@ -840,22 +830,6 @@ function startAutoScanning() {
   scanning = true;
   toggleScanBtn.textContent = "Stop Scanning";
   dbg("Auto-scanning... (locks when stable)");
-
-  // Prefer per-frame callback when available (more reliable on iOS)
-  if (typeof video?.requestVideoFrameCallback === "function") {
-    const tick = async () => {
-      if (!scanning) return;
-      await scanOnce();
-      try { video.requestVideoFrameCallback(() => tick()); } catch {
-        // fallback to interval if Safari refuses
-        scanTimer = setInterval(scanOnce, Number(scanRate.value || 900));
-      }
-    };
-    try { video.requestVideoFrameCallback(() => tick()); } catch {
-      scanTimer = setInterval(scanOnce, Number(scanRate.value || 900));
-    }
-    return;
-  }
 
   scanTimer = setInterval(scanOnce, Number(scanRate.value || 900));
 }
