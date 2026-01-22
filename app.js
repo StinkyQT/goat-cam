@@ -186,11 +186,30 @@ function beautifyControlsAndFit() {
   try { injectPrettyStyles(); } catch {}
   try { removeTopBars(); } catch {}
 
+  // Controls overlay (does not affect video sizing)
+  const applyControlsOverlay = () => {
+    try {
+      const controls = document.getElementById("controls");
+      if (!controls) return;
+
+      // If CSS already handles it (from index.html), this is harmless; we just ensure it sticks.
+      controls.style.position = "fixed";
+      controls.style.left = "0";
+      controls.style.right = "0";
+      controls.style.bottom = "0";
+      controls.style.zIndex = "9998";
+
+      // Measure height so overlay text doesn't hide under controls.
+      const h = controls.getBoundingClientRect().height || controls.offsetHeight || 0;
+      document.documentElement.style.setProperty("--controls-h", `${Math.ceil(h)}px`);
+    } catch {}
+  };
+
   // On some browsers, layout settles after permission prompt. Nudge a few reflows.
   const nudge = () => {
     try {
-      // Ensure we never keep a stale scroll position.
       if (document.documentElement.scrollTop || document.body.scrollTop) window.scrollTo(0, 0);
+      applyControlsOverlay();
 
       // Force guide overlay to re-measure once the video has real dimensions.
       if (guideCanvas) redrawGuide();
@@ -202,8 +221,8 @@ function beautifyControlsAndFit() {
   window.visualViewport?.addEventListener?.("resize", nudge, { passive: true });
   window.addEventListener("orientationchange", () => setTimeout(nudge, 250), { passive: true });
   setTimeout(nudge, 200);
-  setTimeout(nudge, 600);
 }
+
 
 // Keep behavior stable: clean up banners/tray as soon as DOM exists,
 // and again shortly after in case the page injects/rehydrates elements.

@@ -60,12 +60,50 @@
       display: block;
     }
 
-    /* Keep original controls in DOM; JS will move them into a fixed tray when camera starts */
+    
+    /* Controls overlay (no smushing the camera). */
     #controls {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 9998;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 10px;
       padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+      align-items: center;
+      background: rgba(0,0,0,0.45);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-top: 1px solid rgba(255,255,255,0.10);
+    }
+    #controls .chk {
+      grid-column: 1 / -1; /* scan rate on its own row */
+      justify-self: center;
+    }
+    #debug {
+      grid-column: 1 / -1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      opacity: .85;
+      font-size: 12px;
+    }
+    @media (min-width: 520px) {
+      #controls {
+        grid-template-columns: 1fr 1fr auto;
+      }
+      #controls .chk { grid-column: auto; justify-self: end; }
+      #debug { grid-column: 1 / -1; }
     }
 
-    /* Title overlay (doesn't steal layout height) */
+    /* Keep overlay content from sitting under controls */
+    #overlay {
+      padding-bottom: calc(var(--controls-h, 0px) + env(safe-area-inset-bottom, 0px));
+    }
+/* Title overlay (doesn't steal layout height) */
     #titlePill {
       position: fixed;
       top: calc(10px + env(safe-area-inset-top, 0px));
