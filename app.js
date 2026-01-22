@@ -1,6 +1,9 @@
+let frozenStrip = null;
+let freezeAt = 0;
+const FREEZE_COOLDOWN_MS = 900; // avoid refreezing too frequently
 let ocrRolling = [];
 let lastShownOCR = "";
-const BUILD_ID = "2026-01-22 18:45:29";
+const BUILD_ID = "2026-01-22 18:54:07";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
@@ -77,6 +80,8 @@ function resetUI(reason) {
   setBanBadge("—");
   dbg(reason || "");
   try { updateScanButtonLabel(); } catch {}
+  frozenStrip = null;
+  freezeAt = 0;
 }
 
 function removeTopBars() {
@@ -541,6 +546,20 @@ function grabNameStripCanvas(crop = CROP) {
   }
   return c;
 }
+
+function freezeCanvasCopy(srcCanvas) {
+  try {
+    const c = document.createElement("canvas");
+    c.width = srcCanvas.width;
+    c.height = srcCanvas.height;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(srcCanvas, 0, 0);
+    return c;
+  } catch (e) {
+    return null;
+  }
+}
+
 function preprocessBW(srcCanvas) {
   const w = srcCanvas.width, h = srcCanvas.height;
   const scale = 2.4;
@@ -793,7 +812,7 @@ async function scanOnce() {
   };
 
   const attempt = async (crop) => {
-    const strip = grabNameStripCanvas(crop);
+    const strip = (crop === CROP && frozenStrip) ? frozenStrip : grabNameStripCanvas(crop);
     if (!strip) return null;
 
     const bestOCR = await ocrFromStrip(strip);
@@ -835,6 +854,7 @@ async function scanOnce() {
     const { resolved, ocr } = result;
 
     if (resolved.exact) { ocrRolling = []; lastShownOCR = "";
+      frozenStrip = null;
       lockResult(resolved.card, "exact", ocr); return; }
 
     const candidateHysteresis = 0.06;
