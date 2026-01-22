@@ -13,7 +13,7 @@ let freezeAt = 0;
 const FREEZE_COOLDOWN_MS = 900; // avoid refreezing too frequently
 let ocrRolling = [];
 let lastShownOCR = "";
-const BUILD_ID = "2026-01-22 19:34:31";
+const BUILD_ID = "2026-01-22 19:46:21";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
@@ -286,7 +286,7 @@ function canLockCard(card) {
 let guideCanvas = null, guideCtx = null;
 const GUIDE = {
   card: { x: 0.10, y: 0.14, w: 0.80, h: 0.74 },
-  name: { x: 0.13, y: 0.17, w: 0.74, h: 0.11 },
+  name: { x: 0.12, y: 0.155, w: 0.76, h: 0.08 },
   art:  { x: 0.13, y: 0.30, w: 0.74, h: 0.36 },
   set:  { x: 0.13, y: 0.67, w: 0.74, h: 0.08 },
   text: { x: 0.13, y: 0.76, w: 0.74, h: 0.12 }
@@ -345,6 +345,14 @@ function redrawGuide() {
 
   strokeBox(guideCtx, card.x, card.y, card.w, card.h, "rgba(255,255,255,0.92)", null);
   strokeBox(guideCtx, name.x, name.y, name.w, name.h, "rgba(0,255,170,0.98)", "rgba(0,255,170,0.10)");
+  // OCR strip (exact pixels used for OCR)
+  strokeBox(guideCtx, ocr.x, ocr.y, ocr.w, ocr.h, "rgba(255,210,0,0.98)", null);
+  try {
+    guideCtx.font = "12px system-ui";
+    guideCtx.fillStyle = "rgba(255,210,0,0.95)";
+    guideCtx.fillText("OCR", ocr.x + 6, Math.max(12, ocr.y - 6));
+  } catch {}
+
   strokeBox(guideCtx, art.x, art.y, art.w, art.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
   strokeBox(guideCtx, set.x, set.y, set.w, set.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
   strokeBox(guideCtx, text.x, text.y, text.w, text.h, "rgba(255,255,255,0.45)", "rgba(255,255,255,0.03)");
@@ -531,7 +539,7 @@ async function resolveCardFromOCR(ocrText) {
 }
 
 // Crop title strip (kept same guide proportions)
-const CROP = { x: 0.07, y: 0.17, w: 0.82, h: 0.11 };
+const CROP = { x: 0.12, y: 0.155, w: 0.76, h: 0.08 };
 
 
 function getFallbackCrops() {
