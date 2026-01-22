@@ -1,9 +1,13 @@
+let freezeBurstInProgress = false;
+let frozenCandidates = [];
+const FREEZE_BURST_COUNT = 3;
+const FREEZE_BURST_INTERVAL_MS = 60;
 let frozenStrip = null;
 let freezeAt = 0;
 const FREEZE_COOLDOWN_MS = 900; // avoid refreezing too frequently
 let ocrRolling = [];
 let lastShownOCR = "";
-const BUILD_ID = "2026-01-22 18:54:07";
+const BUILD_ID = "2026-01-22 18:59:52";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
@@ -374,11 +378,12 @@ function cleanOCR(t) {
   // - single-letter tokens at the edges (often OCR garbage like "E", "I")
   // - repeated 'o' blobs like "oo" / "ooo"
   const isEdgeNoise = (tok) =>
-    (/^o{2,}$/i.test(tok)) ||                // oo / ooo
-    (/^[A-Za-z]$/.test(tok)) ||              // single letter
-    (/^[A-Za-z]{1}[0-9]$/.test(tok));        // like E8
-
-  while (toks.length && isEdgeNoise(toks[0])) toks.shift();
+    (
+      (/^o{2,}$/i.test(tok)) ||                // oo / ooo
+      (/^[A-Za-z]$/.test(tok)) ||              // single letter
+      (/^[A-Za-z]{1}[0-9]$/.test(tok)) ||      // like E8
+      (/\d/.test(tok))                        // any digit-containing token at the edges (e.g. 8k)
+    );
   while (toks.length && isEdgeNoise(toks[toks.length - 1])) toks.pop();
 
   // If we ended up with nothing, fall back to original trimmed string
@@ -559,6 +564,68 @@ function freezeCanvasCopy(srcCanvas) {
     return null;
   }
 }
+
+function sharpnessScore(canvas) {
+  // Cheap edge-energy metric on a downscaled strip.
+  try {
+    const w = 96, h = 20;
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    const ctx = c.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(canvas, 0, 0, w, h);
+    const img = ctx.getImageData(0, 0, w, h).data;
+
+    let score = 0;
+    // Sum absolute differences between neighboring pixels (approx gradient magnitude)
+    for (let y = 0; y < h; y++) {
+      for (let x = 1; x < w; x++) {
+        const i = (y * w + x) * 4;
+        const il = (y * w + (x - 1)) * 4;
+        const g = (img[i] * 0.299 + img[i+1] * 0.587 + img[i+2] * 0.114);
+        const gl = (img[il] * 0.299 + img[il+1] * 0.587 + img[il+2] * 0.114);
+        score += Math.abs(g - gl);
+      }
+    }
+    return score;
+  } catch (e) {
+    return 0;
+  }
+}
+
+async function startFreezeBurst(primaryStrip) {
+  if (freezeBurstInProgress) return false;
+  freezeBurstInProgress = true;
+  frozenCandidates = [];
+
+  const capture = () => {
+    const snap = freezeCanvasCopy(primaryStrip);
+    if (!snap) return;
+    const s = sharpnessScore(snap);
+    frozenCandidates.push({ canvas: snap, sharp: s });
+    // Keep only best few
+    frozenCandidates.sort((a,b) => b.sharp - a.sharp);
+    frozenCandidates = frozenCandidates.slice(0, FREEZE_BURST_COUNT);
+  };
+
+  capture();
+  for (let i = 1; i < FREEZE_BURST_COUNT; i++) {
+    await new Promise(r => setTimeout(r, FREEZE_BURST_INTERVAL_MS));
+    capture();
+  }
+
+  // Choose sharpest
+  const best = frozenCandidates[0]?.canvas || null;
+  frozenCandidates = [];
+  freezeBurstInProgress = false;
+  if (best) {
+    frozenStrip = best;
+    freezeAt = Date.now();
+    return true;
+  }
+  return false;
+}
+
 
 function preprocessBW(srcCanvas) {
   const w = srcCanvas.width, h = srcCanvas.height;
