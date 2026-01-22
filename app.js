@@ -71,6 +71,7 @@ function resetUI(reason) {
   if (ocrTextEl) ocrTextEl.textContent = "";
   setBanBadge("—");
   dbg(reason || "");
+  try { updateScanButtonLabel(); } catch {}
 }
 
 function removeTopBars() {
@@ -690,86 +691,90 @@ async function scanOnce() {
     const now = Date.now();
     if (now - lastOcrAt < cooldown) return;
 
-    // Grab a strip using the first crop that yields a stable frame.
-    // We do a cheap stability check BEFORE OCR to avoid burning CPU while moving.
-    let chosenStrip = null;
-    let chosenCrop = null;
+    // Stability gate: ONLY use the primary crop so our thumb comparison is consistent.
+    const primaryStrip = grabNameStripCanvas(CROP);
+    if (!primaryStrip) { dbg("Camera not ready…"); return; }
 
-    for (const crop of getFallbackCrops()) {
-      const strip = grabNameStripCanvas(crop);
-      if (!strip) continue;
-
-      // Gate OCR: only proceed when the strip is stable across a couple checks.
-      if (!stabilityGate(strip)) {
-        // Still update OCR line to show we're alive (optional)
-        if (ocrTextEl) ocrTextEl.textContent = "";
-        dbg("Hold steady…");
-        return;
-      }
-
-      chosenStrip = strip;
-      chosenCrop = crop;
-      break;
+    if (!stabilityGate(primaryStrip)) {
+      // Don’t thrash OCR while moving.
+      if (ocrTextEl) ocrTextEl.textContent = "";
+      dbg("Hold steady…");
+      return;
     }
-
-    if (!chosenStrip) { dbg("Camera not ready…"); return; }
 
     lastOcrAt = now;
 
-    // Adaptive OCR: start cheap, then escalate only if needed.
-    const runVariant = async (canvas, label) => {
+    const runVariant = async (canvas) => {
       const data = await ocrWithWorker(canvas);
       const cleaned = cleanOCR(data.text);
-      return { text: cleaned, score: ocrHeuristicScore(cleaned), label };
+      return { text: cleaned, score: ocrHeuristicScore(cleaned) };
     };
 
-    // Pass A: fastest (mean-threshold BW on the chosen crop)
-    let best = null;
-    try {
-      const bw = preprocessBW(chosenStrip);
-      best = await runVariant(bw, "bw");
-      // Early accept if it looks like real title text
-      if (best.text && best.text.length >= 14 && (best.text.match(/[A-Za-z]/g) || []).length >= 10) {
-        if (ocrTextEl) ocrTextEl.textContent = best.text;
-      } else {
-        // Escalate: Otsu (better on gradients)
+    const ocrFromStripFastThenFallback = async (strip) => {
+      // Pass A: mean-threshold BW (fast)
+      let best = null;
+
+      try {
+        const bw = preprocessBW(strip);
+        best = await runVariant(bw);
+
+        // Early accept if it looks like real title text
+        if (best.text && best.text.length >= 14 && (best.text.match(/[A-Za-z]/g) || []).length >= 10) {
+          return best;
+        }
+
+        // Escalate: Otsu (better for gradients)
         try {
-          const o = preprocessOtsu(chosenStrip);
-          const r = await runVariant(o, "otsu");
+          const o = preprocessOtsu(strip);
+          const r = await runVariant(o);
           if (!best || r.score > best.score) best = r;
 
-          // If still poor, try inverted Otsu (white lettering)
+          // If still weak, try inverted Otsu (white lettering)
           if (best.score < 18) {
             try {
               const oi = invertBWCanvas(o);
-              const ri = await runVariant(oi, "otsu-inv");
+              const ri = await runVariant(oi);
               if (ri.score > best.score) best = ri;
             } catch {}
           }
         } catch {}
 
-        // Final fallback: contrast stretch (sometimes helps anti-aliased text)
+        // Final fallback: contrast stretch
         if (best.score < 18) {
           try {
-            const c = preprocessContrast(chosenStrip);
-            const r = await runVariant(c, "contrast");
+            const c = preprocessContrast(strip);
+            const r = await runVariant(c);
             if (r.score > best.score) best = r;
           } catch {}
         }
+      } catch {}
 
-        if (ocrTextEl) ocrTextEl.textContent = best?.text || "";
+      return best || { text: "", score: 0 };
+    };
+
+    // Try OCR on primary crop first; only if it’s weak do we try the other crops.
+    let bestOCR = await ocrFromStripFastThenFallback(primaryStrip);
+
+    if (!bestOCR.text || looksTooPartial(bestOCR.text) || bestOCR.score < 18) {
+      for (const crop of getFallbackCrops()) {
+        if (crop === CROP) continue;
+        const strip = grabNameStripCanvas(crop);
+        if (!strip) continue;
+        const r = await ocrFromStripFastThenFallback(strip);
+        if (r.score > bestOCR.score) bestOCR = r;
+        // If we got something clearly readable, stop.
+        if (bestOCR.text && bestOCR.text.length >= 16 && (bestOCR.text.match(/[A-Za-z]/g) || []).length >= 12) break;
       }
-    } catch (e) {
-      dbg("Scan error: " + (e?.message || e));
-      return;
     }
 
-    if (!best || looksTooPartial(best.text)) { dbg("No readable title — reduce glare."); return; }
+    if (ocrTextEl) ocrTextEl.textContent = bestOCR.text || "";
 
-    const resolved = await resolveCardFromOCR(best.text);
+    if (!bestOCR.text || looksTooPartial(bestOCR.text)) { dbg("No readable title — reduce glare."); return; }
+
+    const resolved = await resolveCardFromOCR(bestOCR.text);
     if (!resolved.card) { dbg("No confident match."); return; }
 
-    if (resolved.exact) { lockResult(resolved.card, "exact", best.text); return; }
+    if (resolved.exact) { lockResult(resolved.card, "exact", bestOCR.text); return; }
 
     if (!lastCandidate || lastCandidate.id !== resolved.card.id) {
       lastCandidate = { id: resolved.card.id, seen: 1, best: resolved.score };
@@ -779,7 +784,7 @@ async function scanOnce() {
     lastCandidate.seen += 1;
     lastCandidate.best = Math.min(lastCandidate.best, resolved.score);
     if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.33) {
-      lockResult(resolved.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, best.text);
+      lockResult(resolved.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, bestOCR.text);
       return;
     }
     dbg("Matching… hold steady");
@@ -790,7 +795,6 @@ async function scanOnce() {
     scanBusy = false;
     if (pendingScan) {
       pendingScan = false;
-      // Process the latest frame ASAP (don't backlog)
       setTimeout(() => scanOnce(), 0);
     }
   }
@@ -799,12 +803,28 @@ async function scanOnce() {
 function startAutoScanning() {
   if (scanTimer) clearInterval(scanTimer);
   scanning = true;
-  toggleScanBtn.textContent = "Stop Scanning";
+  updateScanButtonLabel();
   dbg("Auto-scanning... (locks when stable)");
 
   // Fast lightweight ticks; OCR is still rate-limited by the Scan every dropdown.
   scanTimer = setInterval(scanOnce, 250);
 }
+
+function stopAutoScanning() {
+  if (scanTimer) clearInterval(scanTimer);
+  scanTimer = null;
+  scanning = false;
+  updateScanButtonLabel();
+  dbg("Scanning stopped.");
+}
+
+function updateScanButtonLabel() {
+  if (!toggleScanBtn) return;
+  if (locked) toggleScanBtn.textContent = "Scan New Card";
+  else if (scanning) toggleScanBtn.textContent = "Stop Scanning";
+  else toggleScanBtn.textContent = "Start Scanning";
+}
+
 
 async function startCamera() {
   dbg("Requesting camera…");
@@ -910,9 +930,25 @@ startBtn?.addEventListener("click", async () => {
   }
 });
 toggleScanBtn?.addEventListener("click", async () => {
-  locked = null;
-  lastCandidate = null;
-  resetUI("Scan new card…");
-  if (!scanning) startAutoScanning();
+  // Tri-state:
+  // - If a card is locked, this acts as "Scan New Card"
+  // - If scanning is active, this acts as "Stop Scanning"
+  // - If scanning is inactive, this acts as "Start Scanning"
+  if (locked) {
+    locked = null;
+    lastCandidate = null;
+    resetUI("Scan new card…");
+    updateScanButtonLabel();
+    if (!scanning) startAutoScanning();
+    await scanOnce();
+    return;
+  }
+
+  if (scanning) {
+    stopAutoScanning();
+    return;
+  }
+
+  startAutoScanning();
   await scanOnce();
 });
