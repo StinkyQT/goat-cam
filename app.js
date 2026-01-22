@@ -460,7 +460,7 @@ async function resolveCardFromOCR(ocrText) {
 }
 
 // Crop title strip (kept same guide proportions)
-const CROP = { x: 0.13, y: 0.17, w: 0.74, h: 0.11 };
+const CROP = { x: 0.07, y: 0.17, w: 0.82, h: 0.11 };
 function getVisibleSourceRect() {
   const vw = video.videoWidth, vh = video.videoHeight;
   const r = video.getBoundingClientRect();
@@ -479,15 +479,20 @@ function getVisibleSourceRect() {
   return { offsetX, offsetY, visibleW, visibleH, vw, vh };
 }
 function grabNameStripCanvas() {
+  // Default crop (aligned to the guide box)
+  return grabNameStripCanvasVariant(CROP);
+}
+
+function grabNameStripCanvasVariant(crop) {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
   const vis = getVisibleSourceRect();
   if (!vis) return null;
 
-  let sx = Math.floor(vis.offsetX + vis.visibleW * CROP.x);
-  let sy = Math.floor(vis.offsetY + vis.visibleH * CROP.y);
-  let sw = Math.floor(vis.visibleW * CROP.w);
-  let sh = Math.floor(vis.visibleH * CROP.h);
+  let sx = Math.floor(vis.offsetX + vis.visibleW * crop.x);
+  let sy = Math.floor(vis.offsetY + vis.visibleH * crop.y);
+  let sw = Math.floor(vis.visibleW * crop.w);
+  let sh = Math.floor(vis.visibleH * crop.h);
 
   sx = Math.max(0, Math.min(vw - 1, sx));
   sy = Math.max(0, Math.min(vh - 1, sy));
@@ -498,6 +503,24 @@ function grabNameStripCanvas() {
   c.width = sw; c.height = sh;
   c.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
   return c;
+}
+
+function getFallbackCrops() {
+  // Helps when the title starts near the left edge and we accidentally crop it off.
+  // Also helps Spell/Trap frames where the name bar can sit slightly higher.
+  const left = {
+    x: Math.max(0, CROP.x - 0.05),
+    y: CROP.y,
+    w: Math.min(0.95, CROP.w + 0.05),
+    h: CROP.h
+  };
+  const high = {
+    x: CROP.x,
+    y: Math.max(0, CROP.y - 0.04),
+    w: CROP.w,
+    h: Math.max(0.07, CROP.h - 0.02)
+  };
+  return [left, high];
 }
 function preprocessBW(srcCanvas) {
   const w = srcCanvas.width, h = srcCanvas.height;
@@ -691,102 +714,71 @@ function lockResult(card, method, ocrText) {
 async function scanOnce() {
   if (scanBusy || locked) return;
   scanBusy = true;
+
+  const tryStrip = async (stripCanvas) => {
+    if (!stripCanvas) return null;
+
+    const bw = preprocessBW(stripCanvas);
+
+    // Pass 1: normal BW
+    const data1 = await ocrWithWorker(bw);
+    const cleaned1 = cleanOCR(data1.text);
+
+    // If too partial, try inverted (white title text / dark bar)
+    let bestText = cleaned1;
+    if (looksTooPartial(bestText)) {
+      const inv = invertBWCanvas(bw);
+      const data2 = await ocrWithWorker(inv);
+      const cleaned2 = cleanOCR(data2.text);
+      bestText = (cleaned2 && cleaned2.length > (bestText || "").length) ? cleaned2 : bestText;
+    }
+
+    if (ocrTextEl) ocrTextEl.textContent = bestText || "";
+
+    if (looksTooPartial(bestText)) return { ok: false, reason: "partial", ocr: bestText };
+
+    const resolved = await resolveCardFromOCR(bestText);
+    if (!resolved.card) return { ok: false, reason: "nomatch", ocr: bestText, score: resolved.score };
+
+    return { ok: true, resolved, ocr: bestText };
+  };
+
   try {
-    // Base crop
-    const strip = grabNameStripCanvas();
-    if (!strip) { dbg("Camera not ready…"); return; }
+    // Primary crop (aligned with the guide box)
+    const primary = await tryStrip(grabNameStripCanvas());
+    let result = primary;
 
-    const tryOCR = async (canvas, label) => {
-      const data = await ocrWithWorker(canvas);
-      const cleaned = cleanOCR(data.text);
-      return { cleaned, label };
-    };
-
-    // Pass 1: original mean-threshold BW (best for most monster titles)
-    const bw1 = preprocessBW(strip);
-    let { cleaned, label } = await tryOCR(bw1, "bw");
-    if (ocrTextEl) ocrTextEl.textContent = cleaned || "";
-
-    if (!looksTooPartial(cleaned)) {
-      const resolved = await resolveCardFromOCR(cleaned);
-      if (resolved.card) {
-        if (resolved.exact) { lockResult(resolved.card, "exact", cleaned); return; }
-
-        if (!lastCandidate || lastCandidate.id !== resolved.card.id) {
-          lastCandidate = { id: resolved.card.id, seen: 1, best: resolved.score };
-          dbg("Matching… hold steady");
-          return;
-        }
-        lastCandidate.seen += 1;
-        lastCandidate.best = Math.min(lastCandidate.best, resolved.score);
-        if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.35) {
-          lockResult(resolved.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, cleaned);
-          return;
-        }
-        dbg("Matching… hold steady");
-        return;
+    // If we got gibberish, try a couple fallback crops (left shift / slightly higher bar)
+    if (!result || !result.ok) {
+      for (const crop of getFallbackCrops()) {
+        const r = await tryStrip(grabNameStripCanvasVariant(crop));
+        if (r && r.ok) { result = r; break; }
+        // If OCR got longer (less gibberish), keep it for display even if not matched.
+        if (r && (!result || (r.ocr || "").length > (result.ocr || "").length)) result = r;
       }
     }
 
-    // Only fall back if we couldn't get a confident match.
-    // This keeps Burstinatrix/UFO Turtle performance the same.
-    const attempts = [];
-
-    // Pass 2: Otsu BW (often better on gradients / non-uniform title bars)
-    attempts.push(async () => {
-      const bw = preprocessBWOtsu(strip, false);
-      return await tryOCR(bw, "otsu");
-    });
-
-    // Pass 3: Otsu inverted BW (helps white lettering on dark title bars like many Spell/Trap names)
-    attempts.push(async () => {
-      const bw = preprocessBWOtsu(strip, true);
-      return await tryOCR(bw, "otsu-inv");
-    });
-
-    // Pass 4: slightly taller/shifted crop (some spell/trap frames sit a hair different)
-    attempts.push(async () => {
-      const strip2 = grabNameStripCanvasVariant(-0.02, 0.05);
-      if (!strip2) return { cleaned: "", label: "shift" };
-      const bw = preprocessBWOtsu(strip2, true);
-      return await tryOCR(bw, "shift-otsu-inv");
-    });
-
-    // Pass 5: grayscale + contrast (sometimes Tesseract likes anti-aliased edges)
-    attempts.push(async () => {
-      const g = preprocessGrayContrast(strip);
-      return await tryOCR(g, "gray");
-    });
-
-    for (const fn of attempts) {
-      const out = await fn();
-      const cleaned2 = out.cleaned || "";
-      if (ocrTextEl) ocrTextEl.textContent = cleaned2;
-
-      if (looksTooPartial(cleaned2)) continue;
-
-      const resolved2 = await resolveCardFromOCR(cleaned2);
-      if (!resolved2.card) continue;
-
-      if (resolved2.exact) { lockResult(resolved2.card, `exact (${out.label})`, cleaned2); return; }
-
-      if (!lastCandidate || lastCandidate.id !== resolved2.card.id) {
-        lastCandidate = { id: resolved2.card.id, seen: 1, best: resolved2.score };
-        dbg("Matching… hold steady");
-        return;
-      }
-      lastCandidate.seen += 1;
-      lastCandidate.best = Math.min(lastCandidate.best, resolved2.score);
-      if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.35) {
-        lockResult(resolved2.card, `fuzzy ${lastCandidate.best.toFixed(2)} (${out.label})`, cleaned2);
-        return;
-      }
-      dbg("Matching… hold steady");
+    if (!result || !result.ok) {
+      dbg(result?.reason === "partial" ? "Too little title text — align within box / reduce glare." : "No confident match.");
       return;
     }
 
-    // If we reach here, nothing worked
-    dbg("No confident match — try less glare + hold steady.");
+    const { resolved, ocr } = result;
+
+    if (resolved.exact) { lockResult(resolved.card, "exact", ocr); return; }
+
+    if (!lastCandidate || lastCandidate.id !== resolved.card.id) {
+      lastCandidate = { id: resolved.card.id, seen: 1, best: resolved.score };
+      dbg("Matching… hold steady");
+      return;
+    }
+    lastCandidate.seen += 1;
+    lastCandidate.best = Math.min(lastCandidate.best, resolved.score);
+    if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.33) {
+      lockResult(resolved.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, ocr);
+      return;
+    }
+    dbg("Matching… hold steady");
   } finally { scanBusy = false; }
 }
 
