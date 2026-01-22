@@ -845,7 +845,7 @@ function stopAutoScanning() {
 function updateScanButtonLabel() {
   if (!toggleScanBtn) return;
   if (locked) toggleScanBtn.textContent = "Scan New Card";
-  else if (scanning) updateScanButtonLabel();
+  else if (scanning) toggleScanBtn.textContent = "Stop Scanning";
   else toggleScanBtn.textContent = "Start Scanning";
 }
 
