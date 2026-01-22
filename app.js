@@ -378,9 +378,26 @@ function levenshtein(a, b) {
   return dp[m][n];
 }
 function similarityScore(ocr, name) {
-  const dist = levenshtein(ocr, name);
-  const denom = Math.max(8, Math.max((ocr||"").length, (name||"").length));
-  return dist / denom;
+  const o = (ocr || "").toLowerCase().replace(/[^a-z0-9'\- ]/g, " ").replace(/\s+/g, " ").trim();
+  const n = (name || "").toLowerCase().replace(/[^a-z0-9'\- ]/g, " ").replace(/\s+/g, " ").trim();
+
+  const dist = levenshtein(o, n);
+  const denom = Math.max(8, Math.max(o.length, n.length));
+  let score = dist / denom;
+
+  // Heuristics to be more forgiving when OCR misses the last word (common on some title bars).
+  // If the OCR string is a substantial substring/prefix of the real name, lower the score.
+  if (o.length >= 10 && (n.startsWith(o) || n.includes(o))) score = Math.min(score, 0.22);
+  if (n.length >= 10 && (o.startsWith(n) || o.includes(n))) score = Math.min(score, 0.22);
+
+  // Token coverage bonus: if OCR tokens are all present in the candidate name, lower score a bit.
+  const ot = o.split(" ").filter(Boolean);
+  if (ot.length >= 2) {
+    const allIn = ot.every(t => n.includes(t));
+    if (allIn) score = Math.min(score, 0.25);
+  }
+
+  return score;
 }
 function pickSearchFragment(ocrText) {
   const cleaned = (ocrText || "").toLowerCase().replace(/[^a-z0-9'\- ]/g, " ").replace(/\s+/g, " ").trim();
@@ -389,21 +406,57 @@ function pickSearchFragment(ocrText) {
   return words[0] || cleaned.slice(0, 10) || cleaned;
 }
 async function resolveCardFromOCR(ocrText) {
-  const exact = await ygoproLookupExactName(ocrText);
-  if (exact) return { card: exact, exact: true, score: 0, method: "exact" };
+  // Try multiple OCR variants: original, then progressively dropping a trailing fragment/word.
+  const base = cleanOCR(ocrText);
+  const words = base.split(/\s+/).filter(Boolean);
 
-  const frag = pickSearchFragment(ocrText);
-  if (!frag || frag.length < 3) return { card: null, exact: false, score: 1, method: "none" };
+  const attempts = [];
+  if (base) attempts.push(base);
 
-  const candidates = await ygoproLookupFuzzyName(frag);
-  let best = null;
-  for (const c of candidates.slice(0, 200)) {
-    const score = similarityScore(ocrText, c.name);
-    if (!best || score < best.score) best = { card: c, score };
+  // If last token is short/fragmented (e.g., 'TYPH'), try without it.
+  if (words.length >= 3 && words[words.length - 1].length <= 5) {
+    attempts.push(words.slice(0, -1).join(" "));
   }
-  // strict
-  if (best && best.score <= 0.35) return { card: best.card, exact: false, score: best.score, method: "fuzzy" };
-  return { card: null, exact: false, score: best ? best.score : 1, method: "fuzzy-no" };
+
+  // Also try just the first 2–3 words (helps when the last word is consistently missed)
+  if (words.length >= 3) attempts.push(words.slice(0, 3).join(" "));
+  if (words.length >= 2) attempts.push(words.slice(0, 2).join(" "));
+
+  // De-dupe attempts
+  const seen = new Set();
+  const uniq = [];
+  for (const a of attempts) {
+    const k = a.toLowerCase();
+    if (!seen.has(k) && a.length >= 6) { seen.add(k); uniq.push(a); }
+  }
+
+  let globalBest = null;
+
+  for (const attempt of uniq) {
+    const exact = await ygoproLookupExactName(attempt);
+    if (exact) return { card: exact, exact: true, score: 0, method: "exact" };
+
+    const frag = pickSearchFragment(attempt);
+    if (!frag || frag.length < 3) continue;
+
+    const candidates = await ygoproLookupFuzzyName(frag);
+    let best = null;
+    for (const c of candidates.slice(0, 200)) {
+      const score = similarityScore(attempt, c.name);
+      if (!best || score < best.score) best = { card: c, score, attempt };
+    }
+
+    if (best && (!globalBest || best.score < globalBest.score)) globalBest = best;
+
+    // Early accept if we get a very strong match on any attempt
+    if (best && best.score <= 0.28) return { card: best.card, exact: false, score: best.score, method: "fuzzy", attempt: best.attempt };
+  }
+
+  if (globalBest && globalBest.score <= 0.35) {
+    return { card: globalBest.card, exact: false, score: globalBest.score, method: "fuzzy", attempt: globalBest.attempt };
+  }
+
+  return { card: null, exact: false, score: globalBest ? globalBest.score : 1, method: globalBest ? "fuzzy-no" : "none" };
 }
 
 // Crop title strip (kept same guide proportions)
