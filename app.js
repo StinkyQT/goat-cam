@@ -13,10 +13,10 @@ const SOFT_LOCK_WINDOW_MS = 650;
 const SOFT_LOCK_IMPROVE_MARGIN = 0.08;
 let frozenStrip = null;
 let freezeAt = 0;
-const FREEZE_COOLDOWN_MS = 900; // avoid refreezing too frequently
+const FREEZE_COOLDOWN_MS = 450; // avoid refreezing too frequently
 let ocrRolling = [];
 let lastShownOCR = "";
-const BUILD_ID = "2026-01-22 19:18:10";
+const BUILD_ID = "2026-01-22 19:25:24";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
@@ -888,7 +888,7 @@ async function scanOnce() {
       frozenStrip = null;
       freezeAt = 0;
       lastProgressAt = nowWatch;
-      dbg("Re-centering…");
+      dbg("Scanning…");
     }
 
       const bw = preprocessBW(strip);
@@ -1014,14 +1014,14 @@ async function scanOnce() {
       // If the new candidate isn't clearly better, ignore the switch to avoid rapid flip-flopping.
       const currentBest = (lastCandidate.best ?? 1);
       if (resolved.score > currentBest - candidateHysteresis) {
-        dbg("Matching… hold steady");
+        dbg("Matching…");
         return;
       }
     }
 
     if (!lastCandidate || lastCandidate.id !== resolved.card.id) {
       lastCandidate = { id: resolved.card.id, seen: 1, best: resolved.score };
-      dbg("Matching… hold steady");
+      dbg("Matching…");
       return;
     }
     lastCandidate.seen += 1;
@@ -1030,7 +1030,7 @@ async function scanOnce() {
       lockResult(resolved.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, ocr);
       return;
     }
-    dbg("Matching… hold steady");
+    dbg("Matching…");
   } catch (e) {
     try { console.error(e); } catch {}
     dbg("Scan error: " + (e?.message || e));
