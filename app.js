@@ -1,13 +1,19 @@
 let freezeBurstInProgress = false;
 let frozenCandidates = [];
-const FREEZE_BURST_COUNT = 3;
-const FREEZE_BURST_INTERVAL_MS = 60;
+const FREEZE_BURST_COUNT = 2;
+const FREEZE_BURST_INTERVAL_MS = 40;
+let softLockCard = null;
+let softLockAt = 0;
+let softLockScore = 1;
+let softLockOCR = "";
+const SOFT_LOCK_WINDOW_MS = 650;
+const SOFT_LOCK_IMPROVE_MARGIN = 0.08;
 let frozenStrip = null;
 let freezeAt = 0;
 const FREEZE_COOLDOWN_MS = 900; // avoid refreezing too frequently
 let ocrRolling = [];
 let lastShownOCR = "";
-const BUILD_ID = "2026-01-22 18:59:52";
+const BUILD_ID = "2026-01-22 19:10:23";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
@@ -86,6 +92,10 @@ function resetUI(reason) {
   try { updateScanButtonLabel(); } catch {}
   frozenStrip = null;
   freezeAt = 0;
+  softLockCard = null;
+  softLockAt = 0;
+  softLockScore = 1;
+  softLockOCR = "";
 }
 
 function removeTopBars() {
@@ -452,6 +462,27 @@ function similarityScore(ocr, name) {
 
   return score;
 }
+
+function tokenOrderMatch(ocr, name) {
+  const norm = (s) => (s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9'\- ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const o = norm(ocr);
+  const n = norm(name);
+
+  const ot = o.split(" ").filter(Boolean).filter(t => t.length >= 3);
+  if (ot.length < 2) return false;
+
+  const a = ot[0], b = ot[1];
+  const ia = n.indexOf(a);
+  if (ia < 0) return false;
+  const ib = n.indexOf(b, ia + a.length);
+  return ib >= 0;
+}
+
 function pickSearchFragment(ocrText) {
   const cleaned = (ocrText || "").toLowerCase().replace(/[^a-z0-9'\- ]/g, " ").replace(/\s+/g, " ").trim();
   const words = cleaned.split(" ").filter(w => w.length >= 4);
@@ -896,6 +927,40 @@ async function scanOnce() {
     if (looksTooPartial(bestOCR.text)) return { ok: false, reason: "partial", ocr: bestOCR.text };
 
     const resolved = await resolveCardFromOCR(bestOCR.text);
+    // Soft-lock verification: if we already soft-locked, keep scanning briefly to confirm or improve.
+    if (softLockCard) {
+      // If we found an exact match, promote immediately.
+      if (resolved.card && resolved.exact) {
+        softLockCard = null;
+        frozenStrip = null;
+        lockResult(resolved.card, "exact", bestOCR.text);
+        return;
+      }
+
+      // If a clearly better candidate appears, switch soft lock to it.
+      if (resolved.card && resolved.score + SOFT_LOCK_IMPROVE_MARGIN < softLockScore) {
+        softLockCard = resolved.card;
+        softLockScore = resolved.score;
+        softLockOCR = bestOCR.text;
+        softLockAt = Date.now();
+        dbg("Confirming…");
+      }
+
+      // If window elapsed, promote current soft lock to hard lock.
+      if (Date.now() - softLockAt >= SOFT_LOCK_WINDOW_MS) {
+        const c = softLockCard;
+        const o = softLockOCR;
+        softLockCard = null;
+        frozenStrip = null;
+        lockResult(c, "confirmed", o);
+        return;
+      }
+
+      // Keep showing current best; don’t hard-lock yet.
+      dbg("Confirming…");
+      return;
+    }
+
     if (!resolved.card) return { ok: false, reason: "nomatch", ocr: bestOCR.text, score: resolved.score };
 
     return { ok: true, resolved, ocr: bestOCR.text };
