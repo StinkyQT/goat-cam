@@ -322,6 +322,8 @@ function redrawGuide() {
 }
 
 // OCR + lookup
+let cameraStream = null;
+let imageCapture = null;
 let workerPromise = null;
 async function getWorker() {
   if (!workerPromise) {
@@ -478,18 +480,24 @@ function getVisibleSourceRect() {
   const offsetY = (vh - visibleH) / 2;
   return { offsetX, offsetY, visibleW, visibleH, vw, vh };
 }
-function grabNameStripCanvas() {
+async function grabNameStripCanvas() {
   // Default crop (aligned to the guide box)
-  return grabNameStripCanvasVariant(CROP);
+  return await grabNameStripCanvasVariant(CROP);
 }
 
-function grabNameStripCanvasVariant(crop) {
-  // iOS Safari can throw "The object is in an invalid state." if we drawImage(video)
-  // before the video has current frame data.
-  if (!video || video.readyState < 2) return null; // HAVE_CURRENT_DATA
+async function grabNameStripCanvasVariant(crop) {
+  const frame = await grabFrameBitmap();
+  if (!frame) return null;
 
-  const vw = video.videoWidth, vh = video.videoHeight;
+  let vw, vh;
+  if (frame instanceof HTMLCanvasElement) {
+    vw = frame.width; vh = frame.height;
+  } else {
+    // ImageBitmap
+    vw = frame.width; vh = frame.height;
+  }
   if (!vw || !vh) return null;
+
   const vis = getVisibleSourceRect();
   if (!vis) return null;
 
@@ -505,12 +513,10 @@ function grabNameStripCanvasVariant(crop) {
 
   const c = document.createElement("canvas");
   c.width = sw; c.height = sh;
-
   try {
     const ctx = c.getContext("2d");
-    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+    ctx.drawImage(frame, sx, sy, sw, sh, 0, 0, sw, sh);
   } catch (e) {
-    // InvalidStateError (common on iOS when frame isn't ready yet)
     return null;
   }
   return c;
@@ -781,13 +787,13 @@ async function scanOnce() {
 
   try {
     // Primary crop (aligned with the guide box)
-    const primary = await tryStrip(grabNameStripCanvas());
+    const primary = await tryStrip(await grabNameStripCanvas());
     let result = primary;
 
     // If we got gibberish, try a couple fallback crops (left shift / slightly higher bar)
     if (!result || !result.ok) {
       for (const crop of getFallbackCrops()) {
-        const r = await tryStrip(grabNameStripCanvasVariant(crop));
+        const r = await tryStrip(await grabNameStripCanvasVariant(crop));
         if (r && r.ok) { result = r; break; }
         // If OCR got longer (less gibberish), keep it for display even if not matched.
         if (r && (!result || (r.ocr || "").length > (result.ocr || "").length)) result = r;
@@ -822,15 +828,28 @@ async function scanOnce() {
 }
 
 function startAutoScanning() {
-  if (scanning) return;
+  if (scanTimer) clearInterval(scanTimer);
   scanning = true;
-  const rate = parseInt(scanRateSel?.value, 10) || 900;
-  if (toggleScanBtn) toggleScanBtn.textContent = "Scan New Card";
-  dbg("Auto-scanning… (locks when stable)");
-  scanTimer = setInterval(scanOnce, rate);
-  scanOnce();
-  ensureGuideOverlay();
-  setInterval(() => { if (scanning) redrawGuide(); }, 250);
+  toggleScanBtn.textContent = "Stop Scanning";
+  dbg("Auto-scanning... (locks when stable)");
+
+  // Prefer per-frame callback when available (more reliable on iOS)
+  if (typeof video?.requestVideoFrameCallback === "function") {
+    const tick = async () => {
+      if (!scanning) return;
+      await scanOnce();
+      try { video.requestVideoFrameCallback(() => tick()); } catch {
+        // fallback to interval if Safari refuses
+        scanTimer = setInterval(scanOnce, Number(scanRate.value || 900));
+      }
+    };
+    try { video.requestVideoFrameCallback(() => tick()); } catch {
+      scanTimer = setInterval(scanOnce, Number(scanRate.value || 900));
+    }
+    return;
+  }
+
+  scanTimer = setInterval(scanOnce, Number(scanRate.value || 900));
 }
 
 async function startCamera() {
@@ -882,6 +901,30 @@ async function waitForFirstFrame(timeoutMs = 4000) {
     } catch (e) {
       // keep trying
     }
+
+
+async function grabFrameBitmap() {
+  // Prefer ImageCapture on iOS Safari to avoid drawImage(video) InvalidStateError.
+  if (imageCapture && typeof imageCapture.grabFrame === "function") {
+    try {
+      return await imageCapture.grabFrame(); // ImageBitmap
+    } catch (e) {
+      // fall through
+    }
+  }
+
+  // Fallback: try drawing from <video>
+  if (!video || video.readyState < 2 || !video.videoWidth) return null;
+  const c = document.createElement("canvas");
+  c.width = video.videoWidth;
+  c.height = video.videoHeight;
+  try {
+    c.getContext("2d").drawImage(video, 0, 0);
+    return c;
+  } catch (e) {
+    return null;
+  }
+}
     await new Promise(r => requestAnimationFrame(() => r()));
   }
   return false;
