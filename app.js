@@ -484,6 +484,10 @@ function grabNameStripCanvas() {
 }
 
 function grabNameStripCanvasVariant(crop) {
+  // iOS Safari can throw "The object is in an invalid state." if we drawImage(video)
+  // before the video has current frame data.
+  if (!video || video.readyState < 2) return null; // HAVE_CURRENT_DATA
+
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
   const vis = getVisibleSourceRect();
@@ -501,7 +505,14 @@ function grabNameStripCanvasVariant(crop) {
 
   const c = document.createElement("canvas");
   c.width = sw; c.height = sh;
-  c.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+
+  try {
+    const ctx = c.getContext("2d");
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+  } catch (e) {
+    // InvalidStateError (common on iOS when frame isn't ready yet)
+    return null;
+  }
   return c;
 }
 
@@ -733,6 +744,12 @@ function lockResult(card, method, ocrText) {
 async function scanOnce() {
   if (scanBusy || locked) return;
   scanBusy = true;
+
+  if (!video || video.readyState < 2 || !video.videoWidth) {
+    dbg("Waiting for camera frame…");
+    scanBusy = false;
+    return;
+  }
 
   const tryStrip = async (stripCanvas) => {
     if (!stripCanvas) return null;
