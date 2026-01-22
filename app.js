@@ -1,3 +1,4 @@
+const BUILD_ID = "2026-01-22 18:11:16";
 let lastOcrAt = 0;
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
@@ -46,6 +47,9 @@ const debugEl = document.getElementById("debug");
 function dbg(msg) {
   if (debugEl) debugEl.textContent = msg || "";
 }
+
+dbg(`Build: ${BUILD_ID}`);
+
 
 function setOverlay(state, markText) {
   bigMark?.classList?.remove("ok", "no", "unknown");
@@ -341,8 +345,17 @@ async function getWorker() {
   }
   return workerPromise;
 }
-async function ocrWithWorker(canvasToRead) {
+async function ocrWithWorker(canvasToRead, psm = 7) {
   const worker = await getWorker();
+  // Tighten recognition for title text
+  try {
+    await worker.setParameters({
+      tessedit_pageseg_mode: String(psm),
+      preserve_interword_spaces: "1",
+      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-' 0123456789"
+    });
+  } catch {}
+
   const { data } = await worker.recognize(canvasToRead);
   return data;
 }
@@ -705,9 +718,20 @@ async function scanOnce() {
     lastOcrAt = now;
 
     const runVariant = async (canvas) => {
-      const data = await ocrWithWorker(canvas);
-      const cleaned = cleanOCR(data.text);
-      return { text: cleaned, score: ocrHeuristicScore(cleaned) };
+      // Try PSM 7 (single line). If result looks weak, try PSM 6 (block) as a fallback.
+      const data7 = await ocrWithWorker(canvas, 7);
+      const cleaned7 = cleanOCR(data7.text);
+      let best = { text: cleaned7, score: ocrHeuristicScore(cleaned7) };
+
+      if (best.score < 18) {
+        try {
+          const data6 = await ocrWithWorker(canvas, 6);
+          const cleaned6 = cleanOCR(data6.text);
+          const s6 = ocrHeuristicScore(cleaned6);
+          if (s6 > best.score) best = { text: cleaned6, score: s6 };
+        } catch {}
+      }
+      return best;
     };
 
     const ocrFromStripFastThenFallback = async (strip) => {
@@ -821,7 +845,7 @@ function stopAutoScanning() {
 function updateScanButtonLabel() {
   if (!toggleScanBtn) return;
   if (locked) toggleScanBtn.textContent = "Scan New Card";
-  else if (scanning) toggleScanBtn.textContent = "Stop Scanning";
+  else if (scanning) updateScanButtonLabel();
   else toggleScanBtn.textContent = "Start Scanning";
 }
 
@@ -930,10 +954,10 @@ startBtn?.addEventListener("click", async () => {
   }
 });
 toggleScanBtn?.addEventListener("click", async () => {
-  // Tri-state:
-  // - If a card is locked, this acts as "Scan New Card"
-  // - If scanning is active, this acts as "Stop Scanning"
-  // - If scanning is inactive, this acts as "Start Scanning"
+  // Tri-state behavior:
+  // 1) If a card is locked -> "Scan New Card"
+  // 2) If scanning -> stop
+  // 3) If not scanning -> start
   if (locked) {
     locked = null;
     lastCandidate = null;
