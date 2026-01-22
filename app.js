@@ -25,9 +25,9 @@ async function resetServiceWorkerAndCaches() {
   } catch {}
 }
 
-// Run reset ASAP (normal tabs are often stuck on old SW assets)
+// (Dev convenience) Attempt to unregister any existing Service Worker + clear CacheStorage.
+// This prevents Safari from "holding onto" older builds while you iterate.
 resetServiceWorkerAndCaches();
-
 // ----------------- APP -----------------
 const video = document.getElementById("video");
 const startBtn = document.getElementById("startBtn");
@@ -106,6 +106,11 @@ function injectPrettyStyles() {
       overscroll-behavior: none !important;
     }
     * { box-sizing: border-box; }
+
+    /* Layout hardening */
+    #app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+    #videoWrap { flex: 1 1 auto; min-height: 0; position: relative; background:#000; }
+    #video { width: 100%; height: 100%; object-fit: cover; background:#000; display:block; }
 
     /* Button + select styling (safe overrides) */
     #startBtn, #toggleScanBtn {
@@ -549,6 +554,8 @@ function startAutoScanning() {
 
 async function startCamera() {
   dbg("Requesting camera…");
+
+  // Ensure iOS plays inline and doesn't force fullscreen
   try {
     video.setAttribute("playsinline", "");
     video.setAttribute("webkit-playsinline", "");
@@ -557,61 +564,86 @@ async function startCamera() {
     video.autoplay = true;
   } catch {}
 
-  const stream = await navigator.mediaDevices.getUserMedia({
+  const constraints = {
     video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
     audio: false
-  });
+  };
 
-  // Attach listeners BEFORE srcObject to avoid any race conditions.
-  const metaReady = new Promise((resolve) => {
-    const done = () => resolve();
-    video.addEventListener("loadedmetadata", done, { once: true });
-    video.addEventListener("loadeddata", done, { once: true });
-  });
-
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
   video.srcObject = stream;
 
-  // Wait for metadata/data, but don't hang forever.
-  await Promise.race([
-    metaReady,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Camera metadata timeout")), 2500))
-  ]);
+  // Wait for real dimensions (metadata can be racy on iOS)
+  await new Promise((resolve, reject) => {
+    const done = () => {
+      cleanup();
+      resolve();
+    };
+    const fail = () => {
+      cleanup();
+      reject(new Error("Camera metadata timeout"));
+    };
+    const cleanup = () => {
+      clearTimeout(to);
+      video.removeEventListener("loadedmetadata", done);
+      video.removeEventListener("loadeddata", done);
+    };
 
-  // Try to start playback (muted + user gesture should allow this).
+    // If already ready, resolve immediately
+    if (video.readyState >= 1 && video.videoWidth > 0 && video.videoHeight > 0) return resolve();
+
+    video.addEventListener("loadedmetadata", done, { once: true });
+    video.addEventListener("loadeddata", done, { once: true });
+
+    const to = setTimeout(fail, 3500);
+  });
+
+  // Try to play (retry a couple times)
   for (let i = 0; i < 3; i++) {
     try {
       await video.play();
       break;
     } catch (e) {
-      await new Promise(r => setTimeout(r, 250));
-      if (i === 2) throw e;
+      await new Promise(r => setTimeout(r, 200));
     }
   }
 
-  // If the stream is playing but dimensions are still 0, wait a beat and re-check.
-  if (!video.videoWidth || !video.videoHeight) {
-    await new Promise(r => setTimeout(r, 300));
-  }
+  // Make sure video always has visible size
+  try {
+    video.style.width = "100%";
+    video.style.height = "100%";
+    video.style.objectFit = "cover";
+    video.style.background = "#000";
+  } catch {}
 
-  removeTopBars();
+  try { removeTopBars(); } catch {}
   try { beautifyControlsAndFit(); } catch {}
-  ensureGuideOverlay();
-  redrawGuide();
+  try { ensureGuideOverlay(); redrawGuide(); } catch {}
 
   dbg(`Camera OK (${video.videoWidth || "?"}x${video.videoHeight || "?"}).`);
 }
 
 // Controls
 startBtn?.addEventListener("click", async () => {
+  // iOS Safari can be picky: start the camera ASAP (within the tap gesture),
+  // then load JSON in parallel.
   startBtn.disabled = true;
-  startBtn.textContent = "Loading…";
+  startBtn.textContent = "Starting…";
   try {
-    resetUI("Loading data…");
-    setsRelease = await loadJSON("data/sets_release_dates.json");
-    goatBanlist = await loadJSON("data/goat_banlist_2005_04.json");
-    goatPoolCfg = await loadJSON("data/goat_pool_cutoff.json");
+    resetUI("Starting camera…");
+
+    const dataPromise = (async () => {
+      // Load data (no-store) while camera spins up
+      setsRelease = await loadJSON("data/sets_release_dates.json");
+      goatBanlist = await loadJSON("data/goat_banlist_2005_04.json");
+      goatPoolCfg = await loadJSON("data/goat_pool_cutoff.json");
+    })();
 
     await startCamera();
+
+    // Wait for data (if still loading)
+    resetUI("Loading data…");
+    await dataPromise;
+
     startBtn.textContent = "Camera Ready";
     resetUI("Line up card title and hold steady.");
     startAutoScanning();
@@ -623,7 +655,6 @@ startBtn?.addEventListener("click", async () => {
     dbg("Failed to start camera.");
   }
 });
-
 toggleScanBtn?.addEventListener("click", async () => {
   locked = null;
   lastCandidate = null;
