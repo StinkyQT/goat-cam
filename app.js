@@ -1,12 +1,15 @@
+const BUILD_ID = "2026-01-22 18:31:06";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
 
 window.addEventListener("error", (e) => {
   try { console.error(e); } catch {}
+  try { const msg = e?.message || e?.error?.message || "Unknown error"; dbg("JS error: " + msg); } catch {}
 });
 window.addEventListener("unhandledrejection", (e) => {
   try { console.error(e); } catch {}
+  try { const msg = e?.reason?.message || e?.reason || "Unhandled rejection"; dbg("JS error: " + msg); } catch {}
 });
 
 async function resetServiceWorkerAndCaches() {
@@ -46,6 +49,16 @@ function dbg(msg) {
   if (debugEl) debugEl.textContent = msg || "";
 }
 
+dbg(`Build: ${BUILD_ID}`);
+
+function updateScanButtonLabel() {
+  if (!toggleScanBtn) return;
+  if (locked) toggleScanBtn.textContent = "Scan New Card";
+  else if (scanning) updateScanButtonLabel();
+  else toggleScanBtn.textContent = "Start Scanning";
+}
+
+
 function setOverlay(state, markText) {
   bigMark?.classList?.remove("ok", "no", "unknown");
   bigMark?.classList?.add(state);
@@ -70,6 +83,7 @@ function resetUI(reason) {
   if (ocrTextEl) ocrTextEl.textContent = "";
   setBanBadge("—");
   dbg(reason || "");
+  updateScanButtonLabel();
 }
 
 function removeTopBars() {
@@ -579,6 +593,18 @@ async function scanOnce() {
     const cleaned = cleanOCR(data.text);
     if (ocrTextEl) ocrTextEl.textContent = cleaned || "";
 
+    // If OCR looks weak/scrambled, collect a few stable reads and pick the best.
+    if (bestOCR && bestOCR.score < 20) {
+      ocrBuffer.push(bestOCR);
+      if (ocrBuffer.length < 3) { dbg(\"Reading… hold steady\"); return; }
+      // Pick best of buffer
+      bestOCR = ocrBuffer.reduce((a,b)=> (b.score>a.score?b:a));
+      ocrBuffer = [];
+      if (ocrTextEl) ocrTextEl.textContent = bestOCR.text || \"\";
+    } else {
+      ocrBuffer = [];
+    }
+
     if (looksTooPartial(cleaned)) { dbg("Too little title text — reduce glare."); return; }
 
     const resolved = await resolveCardFromOCR(cleaned);
@@ -613,6 +639,15 @@ function startAutoScanning() {
   setInterval(() => { if (scanning) redrawGuide(); }, 250);
 }
 
+function stopAutoScanning() {
+  if (scanTimer) clearInterval(scanTimer);
+  scanTimer = null;
+  scanning = false;
+  updateScanButtonLabel();
+  dbg("Scanning stopped.");
+}
+
+
 async function startCamera() {
   dbg("Requesting camera…");
   try {
@@ -644,6 +679,7 @@ async function startCamera() {
 
 // Controls
 startBtn?.addEventListener("click", async () => {
+  dbg("Start pressed…");
   startBtn.disabled = true;
   startBtn.textContent = "Loading…";
   try {
@@ -666,9 +702,16 @@ startBtn?.addEventListener("click", async () => {
 });
 
 toggleScanBtn?.addEventListener("click", async () => {
-  locked = null;
-  lastCandidate = null;
-  resetUI("Scan new card…");
-  if (!scanning) startAutoScanning();
+  if (locked) {
+    locked = null;
+    lastCandidate = null;
+    resetUI("Scan new card…");
+    updateScanButtonLabel();
+    if (!scanning) startAutoScanning();
+    await scanOnce();
+    return;
+  }
+  if (scanning) { stopAutoScanning(); return; }
+  startAutoScanning();
   await scanOnce();
 });
