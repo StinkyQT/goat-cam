@@ -1,6 +1,3 @@
-let lastProgressAt = 0;
-let lastDebugMsg = "";
-const STUCK_RESET_MS = 1400;
 let freezeBurstInProgress = false;
 let frozenCandidates = [];
 const FREEZE_BURST_COUNT = 2;
@@ -13,10 +10,10 @@ const SOFT_LOCK_WINDOW_MS = 650;
 const SOFT_LOCK_IMPROVE_MARGIN = 0.08;
 let frozenStrip = null;
 let freezeAt = 0;
-const FREEZE_COOLDOWN_MS = 450; // avoid refreezing too frequently
+const FREEZE_COOLDOWN_MS = 900; // avoid refreezing too frequently
 let ocrRolling = [];
 let lastShownOCR = "";
-const BUILD_ID = "2026-01-22 19:25:24";
+const BUILD_ID = "2026-01-22 19:34:31";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
@@ -63,10 +60,6 @@ const debugEl = document.getElementById("debug");
 
 function dbg(msg) {
   if (debugEl) debugEl.textContent = msg || "";
-  try { lastDebugMsg = String(msg || ""); } catch {}
-  try {
-    if (/locking|exact|confirmed|match|confirming|freezing/i.test(lastDebugMsg)) lastProgressAt = Date.now();
-  } catch {}
 }
 
 dbg(`Build: ${BUILD_ID}`);
@@ -531,7 +524,7 @@ async function resolveCardFromOCR(ocrText) {
       const score = similarityScore(a, c.name);
       if (!best || score < best.score) best = { card: c, score };
     }
-    if (best && best.score <= 0.35) return { card: best.card, exact: false, score: best.score, method: "fuzzy" };
+    if (best && best.score <= 0.48) return { card: best.card, exact: false, score: best.score, method: "fuzzy" };
   }
 
   return { card: null, exact: false, score: 1, method: "none" };
@@ -880,17 +873,6 @@ async function scanOnce() {
     let best = { text: "", score: -1 };
 
     try {
-    // Watchdog: if we appear "stuck" (repeated Hold steady / Matching without progress), reset stabilization & frozen frame.
-    const nowWatch = Date.now();
-    if (lastProgressAt && (nowWatch - lastProgressAt) > STUCK_RESET_MS) {
-      stableCount = 0;
-      lastThumb = null;
-      frozenStrip = null;
-      freezeAt = 0;
-      lastProgressAt = nowWatch;
-      dbg("Scanning…");
-    }
-
       const bw = preprocessBW(strip);
       // If BW looks weak, do best-of-3 reads (helps MST-type scrambling)
       best = await bestOfN(bw, 3);
@@ -943,8 +925,6 @@ async function scanOnce() {
     }
 
     if (looksTooPartial(bestOCR.text)) return { ok: false, reason: "partial", ocr: bestOCR.text };
-
-    if (bestOCR?.text && ocrHeuristicScore(bestOCR.text) >= 24) lastProgressAt = Date.now();
 
     const resolved = await resolveCardFromOCR(bestOCR.text);
     // Soft-lock verification: if we already soft-locked, keep scanning briefly to confirm or improve.
@@ -1009,28 +989,28 @@ async function scanOnce() {
       frozenStrip = null;
       lockResult(resolved.card, "exact", ocr); return; }
 
-    const candidateHysteresis = 0.06;
+    const candidateHysteresis = 0.04;
     if (lastCandidate && lastCandidate.id !== resolved.card.id) {
       // If the new candidate isn't clearly better, ignore the switch to avoid rapid flip-flopping.
       const currentBest = (lastCandidate.best ?? 1);
       if (resolved.score > currentBest - candidateHysteresis) {
-        dbg("Matching…");
+        dbg("Matching… hold steady");
         return;
       }
     }
 
     if (!lastCandidate || lastCandidate.id !== resolved.card.id) {
       lastCandidate = { id: resolved.card.id, seen: 1, best: resolved.score };
-      dbg("Matching…");
+      dbg("Matching… hold steady");
       return;
     }
     lastCandidate.seen += 1;
     lastCandidate.best = Math.min(lastCandidate.best, resolved.score);
-    if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.33) {
+    if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.42) {
       lockResult(resolved.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, ocr);
       return;
     }
-    dbg("Matching…");
+    dbg("Matching… hold steady");
   } catch (e) {
     try { console.error(e); } catch {}
     dbg("Scan error: " + (e?.message || e));
