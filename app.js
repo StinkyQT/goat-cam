@@ -96,22 +96,18 @@ function injectPrettyStyles() {
     :root {
       --gc-border: rgba(0,0,0,.12);
       --gc-shadow: 0 10px 25px rgba(0,0,0,.14);
-      --gc-tray-h: 0px;
     }
 
-    /* Prevent page scroll — treat this like an app shell */
+    /* Treat this like an app shell: no page scrolling */
     html, body {
       height: 100%;
       margin: 0 !important;
       overflow: hidden !important;
       overscroll-behavior: none !important;
     }
-    body {
-      overflow-x: hidden !important;
-      -webkit-tap-highlight-color: transparent !important;
-    }
+    * { box-sizing: border-box; }
 
-    /* Force-clean button style (override any existing CSS) */
+    /* Button + select styling (safe overrides) */
     #startBtn, #toggleScanBtn {
       appearance: none !important;
       -webkit-appearance: none !important;
@@ -126,10 +122,7 @@ function injectPrettyStyles() {
       color: #111 !important;
       min-height: 44px !important;
     }
-    #startBtn:disabled {
-      opacity: .65 !important;
-      box-shadow: none !important;
-    }
+    #startBtn:disabled { opacity: .65 !important; box-shadow: none !important; }
 
     #scanRate {
       border: 1px solid var(--gc-border) !important;
@@ -142,34 +135,43 @@ function injectPrettyStyles() {
       min-height: 44px !important;
     }
 
-    /* Fixed bottom tray */
-    #gcTray {
-      position: fixed !important;
-      left: 0 !important;
-      right: 0 !important;
-      bottom: 0 !important;
-      z-index: 9998 !important; /* below overlay canvas (9999) */
-      padding: 10px 12px calc(10px + env(safe-area-inset-bottom)) !important;
-      backdrop-filter: blur(10px) !important;
-      -webkit-backdrop-filter: blur(10px) !important;
-      background: rgba(255,255,255,.90) !important;
-      border-top: 1px solid rgba(0,0,0,.08) !important;
-      box-shadow: 0 -10px 30px rgba(0,0,0,.08) !important;
-    }
-
-    /* Tray layout: compact grid on small screens, 3-up on larger screens */
-    #gcTrayGrid {
+    /* Make the controls area a dense responsive grid (works with your index.html) */
+    #controls {
       display: grid !important;
       grid-template-columns: 1fr 1fr !important;
       gap: 10px !important;
       align-items: center !important;
+      padding: 10px !important;
+      max-height: 32dvh !important;
+      overflow: hidden !important;
     }
-    /* On narrow screens, put the scan rate on its own row for better fit */
-    #gcTrayGrid #scanRate { grid-column: 1 / -1 !important; }
+    #controls .chk {
+      grid-column: 1 / -1 !important;
+      display: inline-flex !important;
+      gap: 8px !important;
+      justify-content: center !important;
+      align-items: center !important;
+      flex-wrap: wrap !important;
+      white-space: nowrap !important;
+    }
+    #debug {
+      grid-column: 1 / -1 !important;
+      white-space: nowrap !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+    }
+    @media (min-width: 520px) {
+      #controls { grid-template-columns: 1fr 1fr auto !important; }
+      #controls .chk { grid-column: auto !important; justify-self: end !important; }
+    }
 
-    @media (min-width: 560px) {
-      #gcTrayGrid { grid-template-columns: 1.1fr 1.1fr 0.8fr !important; }
-      #gcTrayGrid #scanRate { grid-column: auto !important; }
+    /* Ensure the video is actually visible and fills its container */
+    #video {
+      display: block !important;
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+      background: #000 !important;
     }
   `;
   document.head.appendChild(style);
@@ -179,65 +181,23 @@ function beautifyControlsAndFit() {
   try { injectPrettyStyles(); } catch {}
   try { removeTopBars(); } catch {}
 
-  const btnA = document.getElementById("startBtn");
-  const btnB = document.getElementById("toggleScanBtn");
-  const rate = document.getElementById("scanRate");
-  if (!btnA || !btnB || !video) return;
-
-  // Create a fixed tray once, then move controls into it.
-  let tray = document.getElementById("gcTray");
-  let grid = document.getElementById("gcTrayGrid");
-  if (!tray) {
-    tray = document.createElement("div");
-    tray.id = "gcTray";
-    grid = document.createElement("div");
-    grid.id = "gcTrayGrid";
-    tray.appendChild(grid);
-    document.body.appendChild(tray);
-  }
-  if (!grid) {
-    grid = document.createElement("div");
-    grid.id = "gcTrayGrid";
-    tray.appendChild(grid);
-  }
-
-  // Move controls into tray grid (preserve order)
-  const toMove = [btnA, btnB, rate].filter(Boolean);
-  for (const el of toMove) {
+  // On some browsers, layout settles after permission prompt. Nudge a few reflows.
+  const nudge = () => {
     try {
-      if (el && el.parentElement !== grid) grid.appendChild(el);
-    } catch {}
-  }
+      // Ensure we never keep a stale scroll position.
+      if (document.documentElement.scrollTop || document.body.scrollTop) window.scrollTo(0, 0);
 
-  // Fit video so NO page scroll is needed:
-  // max-height = visible viewport - tray height - small margin.
-  const doFit = () => {
-    try {
-      const vvH = window.visualViewport?.height || window.innerHeight;
-      const trayH = tray.getBoundingClientRect().height || 0;
-      document.documentElement.style.setProperty("--gc-tray-h", trayH + "px");
-
-      const margin = 12;
-      const maxH = Math.max(220, Math.floor(vvH - trayH - margin));
-
-      video.style.maxHeight = maxH + "px";
-      video.style.width = "100%";
-      video.style.height = "auto";
-      video.style.objectFit = "contain";
-
-      // Hard stop: never allow page scroll to persist.
-      if (document.documentElement.scrollTop || document.body.scrollTop) {
-        window.scrollTo(0, 0);
-      }
+      // Force guide overlay to re-measure once the video has real dimensions.
+      if (guideCanvas) redrawGuide();
     } catch {}
   };
 
-  doFit();
-  window.addEventListener("resize", doFit, { passive: true });
-  window.visualViewport?.addEventListener?.("resize", doFit, { passive: true });
-  window.addEventListener("orientationchange", () => setTimeout(doFit, 250), { passive: true });
-  setTimeout(doFit, 200);
-  setTimeout(doFit, 600);
+  nudge();
+  window.addEventListener("resize", nudge, { passive: true });
+  window.visualViewport?.addEventListener?.("resize", nudge, { passive: true });
+  window.addEventListener("orientationchange", () => setTimeout(nudge, 250), { passive: true });
+  setTimeout(nudge, 200);
+  setTimeout(nudge, 600);
 }
 
 // Keep behavior stable: clean up banners/tray as soon as DOM exists,
@@ -601,19 +561,44 @@ async function startCamera() {
     video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
     audio: false
   });
+
+  // Attach listeners BEFORE srcObject to avoid any race conditions.
+  const metaReady = new Promise((resolve) => {
+    const done = () => resolve();
+    video.addEventListener("loadedmetadata", done, { once: true });
+    video.addEventListener("loadeddata", done, { once: true });
+  });
+
   video.srcObject = stream;
-  await new Promise(resolve => (video.onloadedmetadata = () => resolve()));
-  try {
-    await video.play();
-  } catch {
-    await new Promise(r => setTimeout(r, 200));
-    await video.play();
+
+  // Wait for metadata/data, but don't hang forever.
+  await Promise.race([
+    metaReady,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Camera metadata timeout")), 2500))
+  ]);
+
+  // Try to start playback (muted + user gesture should allow this).
+  for (let i = 0; i < 3; i++) {
+    try {
+      await video.play();
+      break;
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 250));
+      if (i === 2) throw e;
+    }
   }
+
+  // If the stream is playing but dimensions are still 0, wait a beat and re-check.
+  if (!video.videoWidth || !video.videoHeight) {
+    await new Promise(r => setTimeout(r, 300));
+  }
+
   removeTopBars();
-  try { beautifyControlsAndFit(); } catch (e) {}
+  try { beautifyControlsAndFit(); } catch {}
   ensureGuideOverlay();
   redrawGuide();
-  dbg(`Camera OK (${video.videoWidth}x${video.videoHeight}).`);
+
+  dbg(`Camera OK (${video.videoWidth || "?"}x${video.videoHeight || "?"}).`);
 }
 
 // Controls
