@@ -2,9 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <h1>Goat Cam 🐐</h1>
-
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Goat Cam 🐐</title>
 
   <!-- PWA -->
   <link rel="manifest" href="manifest.webmanifest">
@@ -14,6 +13,103 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png">
 
   <link rel="stylesheet" href="styles.css" />
+
+  <!-- Critical "app shell" layout: lock the page to the viewport (no page scrolling) -->
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #0b0b0b;
+    }
+    * { box-sizing: border-box; }
+
+    /* App shell */
+    #app {
+      height: 100dvh;
+      height: 100vh; /* fallback */
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Video region takes remaining space */
+    #videoWrap {
+      position: relative;
+      flex: 1;
+      min-height: 0;     /* critical: allows flex child to shrink */
+      overflow: hidden;  /* prevents accidental page scroll */
+    }
+    #video {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+      background: #000;
+    }
+
+    /* Controls: dense + responsive + capped height */
+    #controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 10px;
+      align-items: center;
+
+      /* keep controls from ever forcing page scroll */
+      max-height: 32dvh;
+      overflow: hidden;
+    }
+
+    /* On wider screens, keep all 3 controls in one row */
+    @media (min-width: 520px) {
+      #controls {
+        grid-template-columns: 1fr 1fr auto;
+      }
+    }
+
+    /* Scan rate label behaves like a “button-sized” control */
+    #controls .chk {
+      grid-column: 1 / -1;
+      display: inline-flex;
+      gap: 8px;
+      justify-content: center;
+      align-items: center;
+      flex-wrap: wrap;
+      white-space: nowrap;
+    }
+    @media (min-width: 520px) {
+      #controls .chk { grid-column: auto; justify-self: end; }
+    }
+
+    /* Debug should never grow layout height */
+    #debug {
+      grid-column: 1 / -1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      opacity: .85;
+      font-size: 12px;
+    }
+
+    /* Optional: small title overlay (doesn't consume layout height) */
+    #titleOverlay {
+      position: absolute;
+      top: env(safe-area-inset-top, 0px);
+      left: env(safe-area-inset-left, 0px);
+      padding: 10px 12px;
+      font-weight: 700;
+      font-size: 16px;
+      letter-spacing: .2px;
+      color: rgba(255,255,255,.92);
+      text-shadow: 0 1px 3px rgba(0,0,0,.55);
+      pointer-events: none;
+      z-index: 5;
+    }
+
+    /* Keep the hidden canvas from affecting layout */
+    #canvas { display: none; }
+  </style>
 
   <!-- OCR + fuzzy match -->
   <script defer src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
@@ -28,6 +124,8 @@
 
       <!-- Overlay -->
       <div id="overlay">
+        <div id="titleOverlay">Goat Cam 🐐</div>
+
         <div id="bigMark" class="unknown">…</div>
 
         <div id="lines">
@@ -76,7 +174,7 @@
         </select>
       </label>
 
-      <div id="debug" style="width:100%;opacity:.85;font-size:12px;"></div>
+      <div id="debug"></div>
     </div>
   </div>
 </body>

@@ -73,6 +73,7 @@ function resetUI(reason) {
 }
 
 function removeTopBars() {
+  // Hide any legacy "Goat Cam" headers/banners that might exist in older builds.
   try {
     const candidates = Array.from(document.querySelectorAll("header, h1, h2, div, span"));
     for (const el of candidates) {
@@ -83,44 +84,65 @@ function removeTopBars() {
         const h = el.closest("header");
         if (h) h.style.display = "none";
       }
-
+    }
+  } catch {}
+}
 
 function injectPrettyStyles() {
   if (document.getElementById("prettyStyles")) return;
   const style = document.createElement("style");
   style.id = "prettyStyles";
   style.textContent = `
-    :root { --gc-border: rgba(0,0,0,.12); --gc-shadow: 0 10px 25px rgba(0,0,0,.14); }
+    :root {
+      --gc-border: rgba(0,0,0,.12);
+      --gc-shadow: 0 10px 25px rgba(0,0,0,.14);
+      --gc-tray-h: 0px;
+    }
+
+    /* Prevent page scroll — treat this like an app shell */
+    html, body {
+      height: 100%;
+      margin: 0 !important;
+      overflow: hidden !important;
+      overscroll-behavior: none !important;
+    }
+    body {
+      overflow-x: hidden !important;
+      -webkit-tap-highlight-color: transparent !important;
+    }
+
     /* Force-clean button style (override any existing CSS) */
     #startBtn, #toggleScanBtn {
       appearance: none !important;
       -webkit-appearance: none !important;
       border: 1px solid var(--gc-border) !important;
       border-radius: 999px !important;
-      padding: 12px 14px !important;
+      padding: clamp(10px, 1.5vh, 14px) clamp(12px, 2vw, 16px) !important;
       font-weight: 800 !important;
-      font-size: 16px !important;
+      font-size: clamp(14px, 1.9vh, 16px) !important;
       line-height: 1 !important;
       box-shadow: 0 6px 18px rgba(0,0,0,.10) !important;
       background: #ffffff !important;
       color: #111 !important;
-      -webkit-tap-highlight-color: transparent !important;
+      min-height: 44px !important;
     }
     #startBtn:disabled {
       opacity: .65 !important;
       box-shadow: none !important;
     }
+
     #scanRate {
       border: 1px solid var(--gc-border) !important;
       border-radius: 999px !important;
-      padding: 10px 12px !important;
+      padding: clamp(9px, 1.3vh, 12px) clamp(10px, 1.6vw, 14px) !important;
       font-weight: 700 !important;
-      font-size: 14px !important;
+      font-size: clamp(13px, 1.7vh, 14px) !important;
       background: #ffffff !important;
       color: #111 !important;
+      min-height: 44px !important;
     }
 
-    /* Fixed bottom tray that always fits on iPhone */
+    /* Fixed bottom tray */
     #gcTray {
       position: fixed !important;
       left: 0 !important;
@@ -132,17 +154,23 @@ function injectPrettyStyles() {
       -webkit-backdrop-filter: blur(10px) !important;
       background: rgba(255,255,255,.90) !important;
       border-top: 1px solid rgba(0,0,0,.08) !important;
+      box-shadow: 0 -10px 30px rgba(0,0,0,.08) !important;
     }
-    #gcTrayRow {
-      display: flex !important;
+
+    /* Tray layout: compact grid on small screens, 3-up on larger screens */
+    #gcTrayGrid {
+      display: grid !important;
+      grid-template-columns: 1fr 1fr !important;
       gap: 10px !important;
       align-items: center !important;
     }
-    #gcTrayRow > * { flex: 1 1 auto !important; }
-    #gcTrayRow #scanRate { flex: 0.9 1 auto !important; }
+    /* On narrow screens, put the scan rate on its own row for better fit */
+    #gcTrayGrid #scanRate { grid-column: 1 / -1 !important; }
 
-    /* Prevent accidental body padding from causing extra scroll */
-    body { overflow-x: hidden !important; }
+    @media (min-width: 560px) {
+      #gcTrayGrid { grid-template-columns: 1.1fr 1.1fr 0.8fr !important; }
+      #gcTrayGrid #scanRate { grid-column: auto !important; }
+    }
   `;
   document.head.appendChild(style);
 }
@@ -158,57 +186,67 @@ function beautifyControlsAndFit() {
 
   // Create a fixed tray once, then move controls into it.
   let tray = document.getElementById("gcTray");
-  let row = document.getElementById("gcTrayRow");
+  let grid = document.getElementById("gcTrayGrid");
   if (!tray) {
     tray = document.createElement("div");
     tray.id = "gcTray";
-    row = document.createElement("div");
-    row.id = "gcTrayRow";
-    tray.appendChild(row);
+    grid = document.createElement("div");
+    grid.id = "gcTrayGrid";
+    tray.appendChild(grid);
     document.body.appendChild(tray);
   }
-  if (!row) {
-    row = document.createElement("div");
-    row.id = "gcTrayRow";
-    tray.appendChild(row);
+  if (!grid) {
+    grid = document.createElement("div");
+    grid.id = "gcTrayGrid";
+    tray.appendChild(grid);
   }
 
-  // Move controls into tray row (preserve order)
+  // Move controls into tray grid (preserve order)
   const toMove = [btnA, btnB, rate].filter(Boolean);
   for (const el of toMove) {
     try {
-      if (el && el.parentElement !== row) row.appendChild(el);
+      if (el && el.parentElement !== grid) grid.appendChild(el);
     } catch {}
   }
 
-  // Fit video so NO scroll is needed: max-height = viewport - tray height - small margin.
+  // Fit video so NO page scroll is needed:
+  // max-height = visible viewport - tray height - small margin.
   const doFit = () => {
     try {
+      const vvH = window.visualViewport?.height || window.innerHeight;
       const trayH = tray.getBoundingClientRect().height || 0;
-      const margin = 14;
-      const maxH = Math.max(220, Math.floor(window.innerHeight - trayH - margin));
+      document.documentElement.style.setProperty("--gc-tray-h", trayH + "px");
+
+      const margin = 12;
+      const maxH = Math.max(220, Math.floor(vvH - trayH - margin));
+
       video.style.maxHeight = maxH + "px";
       video.style.width = "100%";
       video.style.height = "auto";
-      // If still overflowing, jump back to top
-      if (document.documentElement.scrollHeight - window.innerHeight > 6) {
+      video.style.objectFit = "contain";
+
+      // Hard stop: never allow page scroll to persist.
+      if (document.documentElement.scrollTop || document.body.scrollTop) {
         window.scrollTo(0, 0);
       }
     } catch {}
   };
 
   doFit();
-  window.addEventListener("resize", doFit);
-  window.addEventListener("orientationchange", () => setTimeout(doFit, 250));
+  window.addEventListener("resize", doFit, { passive: true });
+  window.visualViewport?.addEventListener?.("resize", doFit, { passive: true });
+  window.addEventListener("orientationchange", () => setTimeout(doFit, 250), { passive: true });
   setTimeout(doFit, 200);
   setTimeout(doFit, 600);
 }
 
-    }
-  } catch {}
-}
-document.addEventListener("DOMContentLoaded", () => { removeTopBars();
-  try { beautifyControlsAndFit(); } catch (e) {} setTimeout(removeTopBars, 250); try { beautifyControlsAndFit(); } catch (e) {} });
+// Keep behavior stable: clean up banners/tray as soon as DOM exists,
+// and again shortly after in case the page injects/rehydrates elements.
+document.addEventListener("DOMContentLoaded", () => {
+  try { removeTopBars(); } catch {}
+  try { beautifyControlsAndFit(); } catch {}
+  setTimeout(() => { try { removeTopBars(); } catch {} try { beautifyControlsAndFit(); } catch {} }, 250);
+});
 // Data
 async function loadJSON(path) {
   const r = await fetch(path, { cache: "no-store" });
