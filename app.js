@@ -1,3 +1,4 @@
+const BUILD_ID = "2026-01-22 18:39:31";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
@@ -46,6 +47,9 @@ function dbg(msg) {
   if (debugEl) debugEl.textContent = msg || "";
 }
 
+dbg(`Build: ${BUILD_ID}`);
+
+
 function setOverlay(state, markText) {
   bigMark?.classList?.remove("ok", "no", "unknown");
   bigMark?.classList?.add(state);
@@ -70,6 +74,7 @@ function resetUI(reason) {
   if (ocrTextEl) ocrTextEl.textContent = "";
   setBanBadge("—");
   dbg(reason || "");
+  try { updateScanButtonLabel(); } catch {}
 }
 
 function removeTopBars() {
@@ -345,7 +350,16 @@ async function ocrWithWorker(canvasToRead) {
   return data;
 }
 function cleanOCR(t) {
-  return (t || "").replace(/\n/g, " ").replace(/[^\w'\-: ]/g, " ").replace(/\s+/g, " ").trim();
+  let s = (t || "")
+    .replace(/\n/g, " ")
+    .replace(/[^A-Za-z0-9'\-: ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  s = s.replace(/\s+[A-Za-z0-9]$/, "");
+  s = s.split(" ").filter(tok => !(tok.length <= 2 && /^\d+$/.test(tok))).join(" ");
+  s = s.replace(/\s+/g, " ").trim();
+  return s;
 }
 function looksTooPartial(t) {
   if (!t) return true;
@@ -381,9 +395,33 @@ function levenshtein(a, b) {
   return dp[m][n];
 }
 function similarityScore(ocr, name) {
-  const dist = levenshtein(ocr, name);
-  const denom = Math.max(8, Math.max((ocr||"").length, (name||"").length));
-  return dist / denom;
+  const norm = (s) => (s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9'\- ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const o = norm(ocr);
+  const n = norm(name);
+
+  const dist = levenshtein(o, n);
+  const denom = Math.max(8, Math.max(o.length, n.length));
+  let score = dist / denom;
+
+  if (o.length >= 8 && (n.startsWith(o) || n.includes(o))) score = Math.min(score, 0.22);
+
+  const ot = o.split(" ").filter(Boolean);
+  if (ot.length >= 2) {
+    const first2 = ot[0] + " " + ot[1];
+    if (n.startsWith(first2) || n.includes(first2)) score = Math.min(score, 0.25);
+  }
+  if (ot.length >= 3) {
+    let hit = 0;
+    for (const t of ot.slice(0, 3)) if (t.length >= 4 && n.includes(t)) hit++;
+    if (hit >= 2) score = Math.min(score, 0.30);
+  }
+
+  return score;
 }
 function pickSearchFragment(ocrText) {
   const cleaned = (ocrText || "").toLowerCase().replace(/[^a-z0-9'\- ]/g, " ").replace(/\s+/g, " ").trim();
@@ -392,21 +430,41 @@ function pickSearchFragment(ocrText) {
   return words[0] || cleaned.slice(0, 10) || cleaned;
 }
 async function resolveCardFromOCR(ocrText) {
-  const exact = await ygoproLookupExactName(ocrText);
-  if (exact) return { card: exact, exact: true, score: 0, method: "exact" };
+  const base = cleanOCR(ocrText);
+  const words = base.split(/\s+/).filter(Boolean);
 
-  const frag = pickSearchFragment(ocrText);
-  if (!frag || frag.length < 3) return { card: null, exact: false, score: 1, method: "none" };
-
-  const candidates = await ygoproLookupFuzzyName(frag);
-  let best = null;
-  for (const c of candidates.slice(0, 200)) {
-    const score = similarityScore(ocrText, c.name);
-    if (!best || score < best.score) best = { card: c, score };
+  const attempts = [];
+  if (base) attempts.push(base);
+  if (words.length >= 3) {
+    const last = words[words.length - 1];
+    if (last.length <= 5 || /\d/.test(last)) attempts.push(words.slice(0, -1).join(" "));
   }
-  // strict
-  if (best && best.score <= 0.35) return { card: best.card, exact: false, score: best.score, method: "fuzzy" };
-  return { card: null, exact: false, score: best ? best.score : 1, method: "fuzzy-no" };
+  if (words.length >= 2) attempts.push(words.slice(0, 2).join(" "));
+
+  const seen = new Set();
+  const uniq = [];
+  for (const a of attempts) {
+    const k = a.toLowerCase();
+    if (!seen.has(k) && a.length >= 6) { seen.add(k); uniq.push(a); }
+  }
+
+  for (const a of uniq) {
+    const exact = await ygoproLookupExactName(a);
+    if (exact) return { card: exact, exact: true, score: 0, method: "exact" };
+
+    const frag = pickSearchFragment(a);
+    if (!frag || frag.length < 3) continue;
+
+    const candidates = await ygoproLookupFuzzyName(frag);
+    let best = null;
+    for (const c of candidates.slice(0, 200)) {
+      const score = similarityScore(a, c.name);
+      if (!best || score < best.score) best = { card: c, score };
+    }
+    if (best && best.score <= 0.35) return { card: best.card, exact: false, score: best.score, method: "fuzzy" };
+  }
+
+  return { card: null, exact: false, score: 1, method: "none" };
 }
 
 // Crop title strip (kept same guide proportions)
@@ -488,6 +546,117 @@ function preprocessBW(srcCanvas) {
   return out;
 }
 
+function preprocessContrast(srcCanvas) {
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const scale = 2.0;
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(w * scale));
+  out.height = Math.max(1, Math.round(h * scale));
+  const o = out.getContext("2d");
+  o.imageSmoothingEnabled = true;
+  o.drawImage(srcCanvas, 0, 0, out.width, out.height);
+
+  const img = o.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+
+  let lo = 255, hi = 0;
+  const lum = new Uint8Array(d.length / 4);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+    lum[j] = g;
+    if (g < lo) lo = g;
+    if (g > hi) hi = g;
+  }
+  const span = Math.max(1, hi - lo);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const g = lum[j];
+    const v = ((g - lo) * 255 / span) | 0;
+    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+  o.putImageData(img, 0, 0);
+  return out;
+}
+
+function preprocessOtsu(srcCanvas) {
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const scale = 2.0;
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(w * scale));
+  out.height = Math.max(1, Math.round(h * scale));
+  const o = out.getContext("2d");
+  o.imageSmoothingEnabled = true;
+  o.drawImage(srcCanvas, 0, 0, out.width, out.height);
+
+  const img = o.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+
+  const hist = new Uint32Array(256);
+  const lum = new Uint8Array(d.length / 4);
+
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+    lum[j] = g;
+    hist[g]++;
+  }
+
+  const total = lum.length;
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * hist[t];
+
+  let sumB = 0, wB = 0, wF = 0;
+  let varMax = 0, thr = 128;
+
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    wF = total - wB;
+    if (wF === 0) break;
+
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+
+    if (between > varMax) { varMax = between; thr = t; }
+  }
+
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const v = lum[j] > thr ? 255 : 0;
+    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+  o.putImageData(img, 0, 0);
+  return out;
+}
+
+function invertBWCanvas(bwCanvas) {
+  const out = document.createElement("canvas");
+  out.width = bwCanvas.width;
+  out.height = bwCanvas.height;
+  const ctx = out.getContext("2d");
+  ctx.drawImage(bwCanvas, 0, 0);
+  const img = ctx.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const inv = 255 - d[i];
+    d[i] = d[i + 1] = d[i + 2] = inv;
+    d[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
+function ocrHeuristicScore(text) {
+  const t = (text || "").trim();
+  if (!t) return 0;
+  const letters = (t.match(/[A-Za-z]/g) || []).length;
+  const words = t.split(/\s+/).filter(Boolean).length;
+  const gib = (t.match(/[^A-Za-z0-9'\-: ]/g) || []).length;
+  return letters * 2 + words * 4 - gib * 3 - Math.max(0, 12 - t.length);
+}
+
+
 // UI apply + locking
 function applyCardToUI(card, methodText, ocrText) {
   if (cardNameEl) cardNameEl.textContent = card?.name || "Not sure";
@@ -516,34 +685,92 @@ function lockResult(card, method, ocrText) {
   applyCardToUI(card, `LOCKED (${method})`, ocrText);
   scanning = false;
   if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  updateScanButtonLabel();
 }
 
 async function scanOnce() {
   if (scanBusy || locked) return;
   scanBusy = true;
 
+  const runOCR = async (canvas) => {
+    const data = await ocrWithWorker(canvas);
+    const cleaned = cleanOCR(data.text);
+    return { text: cleaned, score: ocrHeuristicScore(cleaned) };
+  };
+
+  const bestOfN = async (canvas, n) => {
+    let best = { text: "", score: -1 };
+    for (let i = 0; i < n; i++) {
+      const r = await runOCR(canvas);
+      if (r.score > best.score) best = r;
+      // if it's already very good, stop early
+      if (best.score >= 26) break;
+    }
+    return best;
+  };
+
+  const ocrFromStrip = async (strip) => {
+    // Fast pass: BW
+    let best = { text: "", score: -1 };
+
+    try {
+      const bw = preprocessBW(strip);
+      // If BW looks weak, do best-of-3 reads (helps MST-type scrambling)
+      best = await bestOfN(bw, 3);
+
+      // Early accept if it looks clearly readable
+      if (best.text && best.score >= 22) return best;
+
+      // Escalate: Otsu
+      try {
+        const o = preprocessOtsu(strip);
+        const r = await bestOfN(o, 2);
+        if (r.score > best.score) best = r;
+
+        // If still weak, try inverted Otsu (white lettering)
+        if (best.score < 22) {
+          try {
+            const oi = invertBWCanvas(o);
+            const ri = await bestOfN(oi, 2);
+            if (ri.score > best.score) best = ri;
+          } catch {}
+        }
+      } catch {}
+
+      // Final fallback: contrast grayscale (single read)
+      if (best.score < 22) {
+        try {
+          const c = preprocessContrast(strip);
+          const r = await runOCR(c);
+          if (r.score > best.score) best = r;
+        } catch {}
+      }
+    } catch {}
+
+    return best;
+  };
+
   const attempt = async (crop) => {
     const strip = grabNameStripCanvas(crop);
     if (!strip) return null;
-    const bw = preprocessBW(strip);
-    const data = await ocrWithWorker(bw);
-    const cleaned = cleanOCR(data.text);
-    if (ocrTextEl) ocrTextEl.textContent = cleaned || "";
-    if (looksTooPartial(cleaned)) return { ok: false, reason: "partial", ocr: cleaned };
 
-    const resolved = await resolveCardFromOCR(cleaned);
-    if (!resolved.card) return { ok: false, reason: "nomatch", ocr: cleaned, score: resolved.score };
+    const bestOCR = await ocrFromStrip(strip);
+    if (ocrTextEl) ocrTextEl.textContent = bestOCR.text || "";
 
-    return { ok: true, resolved, ocr: cleaned };
+    if (looksTooPartial(bestOCR.text)) return { ok: false, reason: "partial", ocr: bestOCR.text };
+
+    const resolved = await resolveCardFromOCR(bestOCR.text);
+    if (!resolved.card) return { ok: false, reason: "nomatch", ocr: bestOCR.text, score: resolved.score };
+
+    return { ok: true, resolved, ocr: bestOCR.text };
   };
 
   try {
-    // Primary crop (wider/left to reduce clipping when you center the name)
     let result = await attempt(CROP);
 
-    // If no good, try fallbacks (left shift / slightly higher bar)
     if (!result || !result.ok) {
       for (const fc of getFallbackCrops()) {
+        if (fc === CROP) continue;
         const r = await attempt(fc);
         if (r && r.ok) { result = r; break; }
         if (r && (!result || (r.ocr || "").length > (result.ocr || "").length)) result = r;
@@ -551,7 +778,7 @@ async function scanOnce() {
     }
 
     if (!result || !result.ok) {
-      dbg(result?.reason === "partial" ? "Too little title text — align within box / reduce glare." : "No confident match.");
+      dbg(result?.reason === "partial" ? "Too little title text — reduce glare / align within box." : "No confident match.");
       return;
     }
 
@@ -588,6 +815,21 @@ function startAutoScanning() {
   ensureGuideOverlay();
   setInterval(() => { if (scanning) redrawGuide(); }, 250);
 }
+
+function stopAutoScanning() {
+  if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  scanning = false;
+  updateScanButtonLabel();
+  dbg("Scanning stopped.");
+}
+
+function updateScanButtonLabel() {
+  if (!toggleScanBtn) return;
+  if (locked) toggleScanBtn.textContent = "Scan New Card";
+  else if (scanning) toggleScanBtn.textContent = "Stop Scanning";
+  else toggleScanBtn.textContent = "Start Scanning";
+}
+
 
 async function startCamera() {
   dbg("Requesting camera…");
@@ -693,9 +935,22 @@ startBtn?.addEventListener("click", async () => {
   }
 });
 toggleScanBtn?.addEventListener("click", async () => {
-  locked = null;
-  lastCandidate = null;
-  resetUI("Scan new card…");
-  if (!scanning) startAutoScanning();
+  if (locked) {
+    locked = null;
+    lastCandidate = null;
+    resetUI("Scan new card…");
+    updateScanButtonLabel();
+    if (!scanning) startAutoScanning();
+    await scanOnce();
+    return;
+  }
+
+  if (scanning) {
+    stopAutoScanning();
+    return;
+  }
+
+  startAutoScanning();
+  updateScanButtonLabel();
   await scanOnce();
 });
