@@ -6,14 +6,14 @@ let softLockCard = null;
 let softLockAt = 0;
 let softLockScore = 1;
 let softLockOCR = "";
-const SOFT_LOCK_WINDOW_MS = 650;
+const SOFT_LOCK_WINDOW_MS = 420;
 const SOFT_LOCK_IMPROVE_MARGIN = 0.08;
 let frozenStrip = null;
 let freezeAt = 0;
 const FREEZE_COOLDOWN_MS = 900; // avoid refreezing too frequently
 let ocrRolling = [];
 let lastShownOCR = "";
-const BUILD_ID = "2026-01-22 19:46:21";
+const BUILD_ID = "2026-01-22 21:35:15";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
@@ -481,10 +481,14 @@ function tokenOrderMatch(ocr, name) {
   const o = norm(ocr);
   const n = norm(name);
 
-  const ot = o.split(" ").filter(Boolean).filter(t => t.length >= 3);
+  const stop = new Set(["the","of","and","a","an","to","in","on","at","for","by"]);
+  const ot = o.split(" ").filter(Boolean).filter(t => t.length >= 3 && !stop.has(t));
+
   if (ot.length < 2) return false;
 
   const a = ot[0], b = ot[1];
+  if (a.length < 4 || b.length < 4) return false;
+
   const ia = n.indexOf(a);
   if (ia < 0) return false;
   const ib = n.indexOf(b, ia + a.length);
@@ -803,6 +807,28 @@ function ocrHeuristicScore(text) {
   return letters * 2 + words * 4 - gib * 3 - Math.max(0, 12 - t.length);
 }
 
+function isGibberishOCR(text) {
+  const s = cleanOCR(text);
+  if (!s) return true;
+  const letters = (s.match(/[A-Za-z]/g) || []).length;
+  const len = s.length;
+  const toks = s.split(" ").filter(Boolean);
+
+  if (len < 6 || letters < 5) return true;
+
+  const small = toks.filter(t => t.length <= 2).length;
+  if (toks.length >= 3 && small / toks.length > 0.4) return true;
+
+  const vowels = (s.match(/[AEIOUaeiou]/g) || []).length;
+  const vratio = vowels / Math.max(1, letters);
+  if (vratio < 0.18 || vratio > 0.65) return true;
+
+  if (ocrHeuristicScore(s) < 14) return true;
+
+  return false;
+}
+
+
 function pushRollingOCR(text) {
   const cleaned = cleanOCR(text);
   const score = ocrHeuristicScore(cleaned);
@@ -934,9 +960,27 @@ async function scanOnce() {
 
     if (looksTooPartial(bestOCR.text)) return { ok: false, reason: "partial", ocr: bestOCR.text };
 
-    const resolved = await resolveCardFromOCR(bestOCR.text);
+    
+    // If OCR is obvious gibberish, don't get stuck on it.
+    if (isGibberishOCR(bestOCR.text)) {
+      frozenStrip = null;
+      freezeAt = 0;
+      stableCount = 0;
+      lastThumb = null;
+      dbg("Scanning…");
+      return;
+    }
+
+const resolved = await resolveCardFromOCR(bestOCR.text);
     // Soft-lock verification: if we already soft-locked, keep scanning briefly to confirm or improve.
     if (softLockCard) {
+      if (isGibberishOCR(bestOCR.text)) {
+        softLockCard = null;
+        softLockAt = 0;
+        softLockScore = 1;
+        softLockOCR = "";
+      }
+
       // If we found an exact match, promote immediately.
       if (resolved.card && resolved.exact) {
         softLockCard = null;
