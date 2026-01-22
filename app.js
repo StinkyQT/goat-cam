@@ -862,6 +862,30 @@ async function startCamera() {
   dbg(`Camera OK (${video.videoWidth}x${video.videoHeight}).`);
 }
 
+
+
+async function waitForFirstFrame(timeoutMs = 4000) {
+  const start = Date.now();
+  // Try to actually draw a tiny frame from the video. This avoids iOS Safari's
+  // "object is in an invalid state" when frames aren't ready yet.
+  const test = document.createElement("canvas");
+  test.width = 8; test.height = 8;
+  const ctx = test.getContext("2d");
+
+  while (Date.now() - start < timeoutMs) {
+    try {
+      if (video && video.readyState >= 2 && video.videoWidth > 0 && !video.paused) {
+        ctx.drawImage(video, 0, 0, 8, 8);
+        // If drawImage succeeded once, we're good.
+        return true;
+      }
+    } catch (e) {
+      // keep trying
+    }
+    await new Promise(r => requestAnimationFrame(() => r()));
+  }
+  return false;
+}
 // Controls
 startBtn?.addEventListener("click", async () => {
   startBtn.disabled = true;
@@ -875,6 +899,8 @@ startBtn?.addEventListener("click", async () => {
     await startCamera();
     startBtn.textContent = "Camera Ready";
     resetUI("Line up card title and hold steady.");
+    const okFrame = await waitForFirstFrame();
+    if (!okFrame) dbg("Camera warming up… try again / reduce motion");
     startAutoScanning();
   } catch (e) {
     console.error(e);
