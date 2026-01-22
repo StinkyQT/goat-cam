@@ -1,4 +1,6 @@
-const BUILD_ID = "2026-01-22 18:39:31";
+let ocrRolling = [];
+let lastShownOCR = "";
+const BUILD_ID = "2026-01-22 18:45:29";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
@@ -356,9 +358,26 @@ function cleanOCR(t) {
     .replace(/\s+/g, " ")
     .trim();
 
+  // Remove obvious trailing junk like lone characters and stray punctuation-like artifacts
   s = s.replace(/\s+[A-Za-z0-9]$/, "");
-  s = s.split(" ").filter(tok => !(tok.length <= 2 && /^\d+$/.test(tok))).join(" ");
-  s = s.replace(/\s+/g, " ").trim();
+
+  // Remove standalone digit tokens (titles almost never need them)
+  let toks = s.split(" ").filter(Boolean);
+  toks = toks.filter(tok => !(tok.length <= 2 && /^\d+$/.test(tok)));
+
+  // Trim leading/trailing noise tokens:
+  // - single-letter tokens at the edges (often OCR garbage like "E", "I")
+  // - repeated 'o' blobs like "oo" / "ooo"
+  const isEdgeNoise = (tok) =>
+    (/^o{2,}$/i.test(tok)) ||                // oo / ooo
+    (/^[A-Za-z]$/.test(tok)) ||              // single letter
+    (/^[A-Za-z]{1}[0-9]$/.test(tok));        // like E8
+
+  while (toks.length && isEdgeNoise(toks[0])) toks.shift();
+  while (toks.length && isEdgeNoise(toks[toks.length - 1])) toks.pop();
+
+  // If we ended up with nothing, fall back to original trimmed string
+  s = toks.join(" ").replace(/\s+/g, " ").trim();
   return s;
 }
 function looksTooPartial(t) {
@@ -440,6 +459,9 @@ async function resolveCardFromOCR(ocrText) {
     if (last.length <= 5 || /\d/.test(last)) attempts.push(words.slice(0, -1).join(" "));
   }
   if (words.length >= 2) attempts.push(words.slice(0, 2).join(" "));
+
+  // If OCR sometimes prepends a stray letter, try dropping the first token.
+  if (words.length >= 3 && /^[A-Za-z]$/.test(words[0])) attempts.push(words.slice(1).join(" "));
 
   const seen = new Set();
   const uniq = [];
@@ -656,6 +678,26 @@ function ocrHeuristicScore(text) {
   return letters * 2 + words * 4 - gib * 3 - Math.max(0, 12 - t.length);
 }
 
+function pushRollingOCR(text) {
+  const cleaned = cleanOCR(text);
+  const score = ocrHeuristicScore(cleaned);
+  if (!cleaned) return null;
+
+  ocrRolling.push({ text: cleaned, score, t: Date.now() });
+  // keep last ~1.5s or max 6 entries
+  const cutoff = Date.now() - 1500;
+  ocrRolling = ocrRolling.filter(x => x.t >= cutoff).slice(-6);
+
+  // Pick the best-scoring text; tie-breaker: longer text
+  let best = ocrRolling[0];
+  for (const x of ocrRolling) {
+    if (x.score > best.score + 0.5) best = x;
+    else if (Math.abs(x.score - best.score) <= 0.5 && x.text.length > best.text.length) best = x;
+  }
+  return best;
+}
+
+
 
 // UI apply + locking
 function applyCardToUI(card, methodText, ocrText) {
@@ -755,7 +797,15 @@ async function scanOnce() {
     if (!strip) return null;
 
     const bestOCR = await ocrFromStrip(strip);
-    if (ocrTextEl) ocrTextEl.textContent = bestOCR.text || "";
+    if (ocrTextEl) {
+      const bestRoll = pushRollingOCR(bestOCR.text || "");
+      const show = (bestRoll?.text || bestOCR.text || "" || "");
+      // Don’t replace the UI text with obviously worse garbage
+      if (show && (show.length >= lastShownOCR.length - 2 || ocrHeuristicScore(show) >= ocrHeuristicScore(lastShownOCR) - 3)) {
+        ocrTextEl.textContent = show;
+        lastShownOCR = show;
+      }
+    }
 
     if (looksTooPartial(bestOCR.text)) return { ok: false, reason: "partial", ocr: bestOCR.text };
 
@@ -784,7 +834,18 @@ async function scanOnce() {
 
     const { resolved, ocr } = result;
 
-    if (resolved.exact) { lockResult(resolved.card, "exact", ocr); return; }
+    if (resolved.exact) { ocrRolling = []; lastShownOCR = "";
+      lockResult(resolved.card, "exact", ocr); return; }
+
+    const candidateHysteresis = 0.06;
+    if (lastCandidate && lastCandidate.id !== resolved.card.id) {
+      // If the new candidate isn't clearly better, ignore the switch to avoid rapid flip-flopping.
+      const currentBest = (lastCandidate.best ?? 1);
+      if (resolved.score > currentBest - candidateHysteresis) {
+        dbg("Matching… hold steady");
+        return;
+      }
+    }
 
     if (!lastCandidate || lastCandidate.id !== resolved.card.id) {
       lastCandidate = { id: resolved.card.id, seen: 1, best: resolved.score };
