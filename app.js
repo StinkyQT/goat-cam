@@ -410,14 +410,17 @@ async function resolveCardFromOCR(ocrText) {
 }
 
 // Crop title strip (kept same guide proportions)
-const CROP = { x: 0.07, y: 0.17, w: 0.82, h: 0.11 };
+const CROP = { x: 0.13, y: 0.17, w: 0.74, h: 0.11 };
 
 
 function getFallbackCrops() {
-  // Fallback crops that help when the name gets clipped or the title bar sits slightly higher (Spell/Trap).
-  const left = { x: Math.max(0, CROP.x - 0.05), y: CROP.y, w: Math.min(0.95, CROP.w + 0.05), h: CROP.h };
-  const high = { x: CROP.x, y: Math.max(0, CROP.y - 0.04), w: CROP.w, h: Math.max(0.07, CROP.h - 0.02) };
-  return [left, high];
+  // Multiple crops: keep the original (works well for many monster cards),
+  // but add variants that help Spell/Trap title bars and left-edge clipping.
+  const wideLeft = { x: 0.07, y: 0.17, w: 0.82, h: 0.11 };   // user-discovered "left aligns better"
+  const leftMore = { x: 0.05, y: 0.17, w: 0.85, h: 0.11 };   // even more left margin
+  const highBar  = { x: 0.13, y: 0.13, w: 0.74, h: 0.09 };   // slightly higher + shorter (Spell/Trap)
+  const highWide = { x: 0.07, y: 0.13, w: 0.82, h: 0.09 };   // combo
+  return [CROP, wideLeft, leftMore, highBar, highWide];
 }
 function getVisibleSourceRect() {
   const vw = video.videoWidth, vh = video.videoHeight;
@@ -488,6 +491,121 @@ function preprocessBW(srcCanvas) {
   return out;
 }
 
+function preprocessContrast(srcCanvas) {
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const scale = 2.2;
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(w * scale));
+  out.height = Math.max(1, Math.round(h * scale));
+  const o = out.getContext("2d");
+  o.imageSmoothingEnabled = true;
+  o.drawImage(srcCanvas, 0, 0, out.width, out.height);
+
+  const img = o.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+
+  // Histogram stretch on luminance to handle gradients/glare.
+  let lo = 255, hi = 0;
+  const lum = new Uint8Array(d.length / 4);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+    lum[j] = g;
+    if (g < lo) lo = g;
+    if (g > hi) hi = g;
+  }
+  const span = Math.max(1, hi - lo);
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const g = lum[j];
+    const v = ((g - lo) * 255 / span) | 0;
+    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+  o.putImageData(img, 0, 0);
+  return out;
+}
+
+function preprocessOtsu(srcCanvas) {
+  // Otsu thresholding often works better than mean-threshold on Spell/Trap name bars.
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const scale = 2.2;
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(w * scale));
+  out.height = Math.max(1, Math.round(h * scale));
+  const o = out.getContext("2d");
+  o.imageSmoothingEnabled = true;
+  o.drawImage(srcCanvas, 0, 0, out.width, out.height);
+
+  const img = o.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+
+  const hist = new Uint32Array(256);
+  const lum = new Uint8Array(d.length / 4);
+
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+    lum[j] = g;
+    hist[g]++;
+  }
+
+  const total = lum.length;
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * hist[t];
+
+  let sumB = 0, wB = 0, wF = 0;
+  let varMax = 0, thr = 128;
+
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    wF = total - wB;
+    if (wF === 0) break;
+
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+
+    if (between > varMax) { varMax = between; thr = t; }
+  }
+
+  for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+    const v = lum[j] > thr ? 255 : 0;
+    d[i] = d[i + 1] = d[i + 2] = v;
+    d[i + 3] = 255;
+  }
+  o.putImageData(img, 0, 0);
+  return out;
+}
+
+function invertBWCanvas(bwCanvas) {
+  const out = document.createElement("canvas");
+  out.width = bwCanvas.width;
+  out.height = bwCanvas.height;
+  const ctx = out.getContext("2d");
+  ctx.drawImage(bwCanvas, 0, 0);
+  const img = ctx.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const v = d[i];
+    const inv = 255 - v;
+    d[i] = d[i + 1] = d[i + 2] = inv;
+    d[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
+function ocrHeuristicScore(text) {
+  const t = (text || "").trim();
+  if (!t) return 0;
+  const letters = (t.match(/[A-Za-z]/g) || []).length;
+  const words = t.split(/\s+/).filter(Boolean).length;
+  const gib = (t.match(/[^A-Za-z0-9'\-: ]/g) || []).length;
+  // Higher is better
+  return letters * 2 + words * 4 - gib * 3 - Math.max(0, 12 - t.length);
+}
+
+
 // UI apply + locking
 function applyCardToUI(card, methodText, ocrText) {
   if (cardNameEl) cardNameEl.textContent = card?.name || "Not sure";
@@ -525,37 +643,64 @@ async function scanOnce() {
   const attempt = async (crop) => {
     const strip = grabNameStripCanvas(crop);
     if (!strip) return null;
-    const bw = preprocessBW(strip);
-    const data = await ocrWithWorker(bw);
-    const cleaned = cleanOCR(data.text);
-    if (ocrTextEl) ocrTextEl.textContent = cleaned || "";
-    if (looksTooPartial(cleaned)) return { ok: false, reason: "partial", ocr: cleaned };
 
-    const resolved = await resolveCardFromOCR(cleaned);
-    if (!resolved.card) return { ok: false, reason: "nomatch", ocr: cleaned, score: resolved.score };
+    // Preprocess variants:
+    // 1) mean-threshold BW (good for many monster titles)
+    // 2) Otsu BW (often better for gradients on Spell/Trap)
+    // 3) inverted BW (white lettering)
+    // 4) contrast grayscale (sometimes Tesseract prefers anti-aliased edges)
+    const variants = [];
+    try {
+      const bw = preprocessBW(strip);
+      variants.push({ kind: "bw", canvas: bw });
+      try { variants.push({ kind: "bw-inv", canvas: invertBWCanvas(bw) }); } catch {}
+    } catch {}
 
-    return { ok: true, resolved, ocr: cleaned };
+    try { variants.push({ kind: "otsu", canvas: preprocessOtsu(strip) }); } catch {}
+    try {
+      const o = preprocessOtsu(strip);
+      variants.push({ kind: "otsu-inv", canvas: invertBWCanvas(o) });
+    } catch {}
+
+    try { variants.push({ kind: "contrast", canvas: preprocessContrast(strip) }); } catch {}
+
+    let bestOCR = { text: "", score: -1, kind: "" };
+
+    for (const v of variants) {
+      const data = await ocrWithWorker(v.canvas);
+      const cleaned = cleanOCR(data.text);
+      const s = ocrHeuristicScore(cleaned);
+      if (s > bestOCR.score) bestOCR = { text: cleaned, score: s, kind: v.kind };
+      // Quick win: if we already have a very strong-looking string, stop early.
+      if (cleaned && cleaned.length >= 16 && (cleaned.match(/[A-Za-z]/g) || []).length >= 12) break;
+    }
+
+    if (ocrTextEl) ocrTextEl.textContent = bestOCR.text || "";
+
+    if (looksTooPartial(bestOCR.text)) return { ok: false, reason: "partial", ocr: bestOCR.text, ocrKind: bestOCR.kind };
+
+    const resolved = await resolveCardFromOCR(bestOCR.text);
+    if (!resolved.card) return { ok: false, reason: "nomatch", ocr: bestOCR.text, score: resolved.score, ocrKind: bestOCR.kind };
+
+    return { ok: true, resolved, ocr: bestOCR.text, ocrKind: bestOCR.kind };
   };
 
   try {
-    // Primary crop (wider/left to reduce clipping when you center the name)
-    let result = await attempt(CROP);
+    let bestResult = null;
 
-    // If no good, try fallbacks (left shift / slightly higher bar)
-    if (!result || !result.ok) {
-      for (const fc of getFallbackCrops()) {
-        const r = await attempt(fc);
-        if (r && r.ok) { result = r; break; }
-        if (r && (!result || (r.ocr || "").length > (result.ocr || "").length)) result = r;
-      }
+    // Try a small set of crops. We pick the first "ok" match; otherwise keep the best OCR string.
+    for (const crop of getFallbackCrops()) {
+      const r = await attempt(crop);
+      if (r && r.ok) { bestResult = r; break; }
+      if (r && (!bestResult || (r.ocr || "").length > (bestResult.ocr || "").length)) bestResult = r;
     }
 
-    if (!result || !result.ok) {
-      dbg(result?.reason === "partial" ? "Too little title text — align within box / reduce glare." : "No confident match.");
+    if (!bestResult || !bestResult.ok) {
+      dbg(bestResult?.reason === "partial" ? "Too little title text — reduce glare / align within box." : "No confident match.");
       return;
     }
 
-    const { resolved, ocr } = result;
+    const { resolved, ocr } = bestResult;
 
     if (resolved.exact) { lockResult(resolved.card, "exact", ocr); return; }
 
