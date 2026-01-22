@@ -470,20 +470,25 @@ function grabNameStripCanvas() {
 }
 function preprocessBW(srcCanvas) {
   const w = srcCanvas.width, h = srcCanvas.height;
-  const scale = 2.4;
+  const scale = 2.6; // slightly higher to help thin/bright title fonts like MST
   const out = document.createElement("canvas");
   out.width = Math.max(1, Math.round(w * scale));
   out.height = Math.max(1, Math.round(h * scale));
   const o = out.getContext("2d");
   o.imageSmoothingEnabled = true;
   o.drawImage(srcCanvas, 0, 0, out.width, out.height);
+
   const img = o.getImageData(0, 0, out.width, out.height);
   const d = img.data;
 
+  // Simple global threshold. Works well for black text on light, but
+  // some titles (e.g., white lettering) benefit from trying an inverted pass too.
   let sum = 0;
   for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
   const mean = sum / (d.length / 4);
-  const thr = Math.max(80, Math.min(180, mean * 0.90));
+
+  // Slightly less aggressive threshold than before (mean*0.90 could drop thin bright strokes).
+  const thr = Math.max(70, Math.min(190, mean * 0.85));
 
   for (let i = 0; i < d.length; i += 4) {
     const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
@@ -492,6 +497,24 @@ function preprocessBW(srcCanvas) {
     d[i + 3] = 255;
   }
   o.putImageData(img, 0, 0);
+  return out;
+}
+
+function invertBWCanvas(bwCanvas) {
+  const out = document.createElement("canvas");
+  out.width = bwCanvas.width;
+  out.height = bwCanvas.height;
+  const ctx = out.getContext("2d");
+  ctx.drawImage(bwCanvas, 0, 0);
+  const img = ctx.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const v = d[i]; // 0 or 255
+    const inv = 255 - v;
+    d[i] = d[i + 1] = d[i + 2] = inv;
+    d[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
   return out;
 }
 
@@ -533,26 +556,86 @@ async function scanOnce() {
     if (!strip) { dbg("Camera not ready…"); return; }
 
     const bw = preprocessBW(strip);
-    const data = await ocrWithWorker(bw);
-    const cleaned = cleanOCR(data.text);
-    if (ocrTextEl) ocrTextEl.textContent = cleaned || "";
 
-    if (looksTooPartial(cleaned)) { dbg("Too little title text — reduce glare."); return; }
+    // Pass 1: normal BW
+    const data1 = await ocrWithWorker(bw);
+    const cleaned1 = cleanOCR(data1.text);
 
-    const resolved = await resolveCardFromOCR(cleaned);
-    if (!resolved.card) { dbg("No confident match."); return; }
+    if (looksTooPartial(cleaned1)) {
+      // Some cards have white title text; try inverted before giving up.
+      const inv = invertBWCanvas(bw);
+      const data2 = await ocrWithWorker(inv);
+      const cleaned2 = cleanOCR(data2.text);
 
-    if (resolved.exact) { lockResult(resolved.card, "exact", cleaned); return; }
+      const chosen = cleaned2 && cleaned2.length > (cleaned1 || "").length ? cleaned2 : cleaned1;
+      if (ocrTextEl) ocrTextEl.textContent = chosen || "";
 
-    if (!lastCandidate || lastCandidate.id !== resolved.card.id) {
-      lastCandidate = { id: resolved.card.id, seen: 1, best: resolved.score };
+      if (looksTooPartial(chosen)) { dbg("Too little title text — reduce glare."); return; }
+
+      const resolved2 = await resolveCardFromOCR(chosen);
+      if (!resolved2.card) { dbg("No confident match."); return; }
+
+      // same stability logic below, using resolved2
+      if (resolved2.exact) { lockResult(resolved2.card, "exact", chosen); return; }
+
+      if (!lastCandidate || lastCandidate.id !== resolved2.card.id) {
+        lastCandidate = { id: resolved2.card.id, seen: 1, best: resolved2.score };
+        dbg("Matching… hold steady");
+        return;
+      }
+      lastCandidate.seen += 1;
+      lastCandidate.best = Math.min(lastCandidate.best, resolved2.score);
+      if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.33) {
+        lockResult(resolved2.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, chosen);
+        return;
+      }
+      dbg("Matching… hold steady");
+      return;
+    }
+
+    if (ocrTextEl) ocrTextEl.textContent = cleaned1 || "";
+
+    const resolved1 = await resolveCardFromOCR(cleaned1);
+    if (!resolved1.card) {
+      // Pass 2: inverted BW (helps white lettering / dark title bars)
+      const inv = invertBWCanvas(bw);
+      const data2 = await ocrWithWorker(inv);
+      const cleaned2 = cleanOCR(data2.text);
+      if (ocrTextEl) ocrTextEl.textContent = cleaned2 || cleaned1 || "";
+
+      if (looksTooPartial(cleaned2)) { dbg("No confident match."); return; }
+
+      const resolved2 = await resolveCardFromOCR(cleaned2);
+      if (!resolved2.card) { dbg("No confident match."); return; }
+
+      if (resolved2.exact) { lockResult(resolved2.card, "exact", cleaned2); return; }
+
+      if (!lastCandidate || lastCandidate.id !== resolved2.card.id) {
+        lastCandidate = { id: resolved2.card.id, seen: 1, best: resolved2.score };
+        dbg("Matching… hold steady");
+        return;
+      }
+      lastCandidate.seen += 1;
+      lastCandidate.best = Math.min(lastCandidate.best, resolved2.score);
+      if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.33) {
+        lockResult(resolved2.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, cleaned2);
+        return;
+      }
+      dbg("Matching… hold steady");
+      return;
+    }
+
+    if (resolved1.exact) { lockResult(resolved1.card, "exact", cleaned1); return; }
+
+    if (!lastCandidate || lastCandidate.id !== resolved1.card.id) {
+      lastCandidate = { id: resolved1.card.id, seen: 1, best: resolved1.score };
       dbg("Matching… hold steady");
       return;
     }
     lastCandidate.seen += 1;
-    lastCandidate.best = Math.min(lastCandidate.best, resolved.score);
+    lastCandidate.best = Math.min(lastCandidate.best, resolved1.score);
     if (lastCandidate.seen >= 2 && lastCandidate.best <= 0.33) {
-      lockResult(resolved.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, cleaned);
+      lockResult(resolved1.card, `fuzzy ${lastCandidate.best.toFixed(2)}`, cleaned1);
       return;
     }
     dbg("Matching… hold steady");
