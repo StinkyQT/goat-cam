@@ -549,6 +549,25 @@ function preprocessBW(srcCanvas) {
   return out;
 }
 
+function invertBWCanvas(bwCanvas) {
+  const out = document.createElement("canvas");
+  out.width = bwCanvas.width;
+  out.height = bwCanvas.height;
+  const ctx = out.getContext("2d");
+  ctx.drawImage(bwCanvas, 0, 0);
+  const img = ctx.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const v = d[i];
+    const inv = 255 - v;
+    d[i] = d[i + 1] = d[i + 2] = inv;
+    d[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
+
 function invertCanvas(srcCanvas) {
   const out = document.createElement("canvas");
   out.width = srcCanvas.width;
@@ -726,7 +745,7 @@ async function scanOnce() {
 
     // If too partial, try inverted (white title text / dark bar)
     let bestText = cleaned1;
-    if (looksTooPartial(bestText)) {
+    if (looksTooPartial(bestText) && typeof invertBWCanvas === "function") {
       const inv = invertBWCanvas(bw);
       const data2 = await ocrWithWorker(inv);
       const cleaned2 = cleanOCR(data2.text);
@@ -779,6 +798,9 @@ async function scanOnce() {
       return;
     }
     dbg("Matching… hold steady");
+  } catch (e) {
+    try { console.error(e); } catch {}
+    try { dbg("Scan error: " + (e?.message || e)); } catch {}
   } finally { scanBusy = false; }
 }
 
