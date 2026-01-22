@@ -1,3 +1,6 @@
+let lastProgressAt = 0;
+let lastDebugMsg = "";
+const STUCK_RESET_MS = 1400;
 let freezeBurstInProgress = false;
 let frozenCandidates = [];
 const FREEZE_BURST_COUNT = 2;
@@ -13,7 +16,7 @@ let freezeAt = 0;
 const FREEZE_COOLDOWN_MS = 900; // avoid refreezing too frequently
 let ocrRolling = [];
 let lastShownOCR = "";
-const BUILD_ID = "2026-01-22 19:10:23";
+const BUILD_ID = "2026-01-22 19:18:10";
 // Goat Cam - app.js (CACHE/SW RESET BUILD - no banner)
 // Purpose: fix "different behavior in Private vs Normal" by nuking any old Service Worker + caches,
 // then proceed with normal camera flow. After one successful load, you can keep this build or swap back.
@@ -60,6 +63,10 @@ const debugEl = document.getElementById("debug");
 
 function dbg(msg) {
   if (debugEl) debugEl.textContent = msg || "";
+  try { lastDebugMsg = String(msg || ""); } catch {}
+  try {
+    if (/locking|exact|confirmed|match|confirming|freezing/i.test(lastDebugMsg)) lastProgressAt = Date.now();
+  } catch {}
 }
 
 dbg(`Build: ${BUILD_ID}`);
@@ -873,6 +880,17 @@ async function scanOnce() {
     let best = { text: "", score: -1 };
 
     try {
+    // Watchdog: if we appear "stuck" (repeated Hold steady / Matching without progress), reset stabilization & frozen frame.
+    const nowWatch = Date.now();
+    if (lastProgressAt && (nowWatch - lastProgressAt) > STUCK_RESET_MS) {
+      stableCount = 0;
+      lastThumb = null;
+      frozenStrip = null;
+      freezeAt = 0;
+      lastProgressAt = nowWatch;
+      dbg("Re-centering…");
+    }
+
       const bw = preprocessBW(strip);
       // If BW looks weak, do best-of-3 reads (helps MST-type scrambling)
       best = await bestOfN(bw, 3);
@@ -925,6 +943,8 @@ async function scanOnce() {
     }
 
     if (looksTooPartial(bestOCR.text)) return { ok: false, reason: "partial", ocr: bestOCR.text };
+
+    if (bestOCR?.text && ocrHeuristicScore(bestOCR.text) >= 24) lastProgressAt = Date.now();
 
     const resolved = await resolveCardFromOCR(bestOCR.text);
     // Soft-lock verification: if we already soft-locked, keep scanning briefly to confirm or improve.
