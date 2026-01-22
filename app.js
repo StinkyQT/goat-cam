@@ -493,13 +493,18 @@ async function grabNameStripCanvasVariant(crop) {
   if (frame instanceof HTMLCanvasElement) {
     vw = frame.width; vh = frame.height;
   } else {
-    // ImageBitmap
     vw = frame.width; vh = frame.height;
   }
-  if (!vw || !vh) return null;
+  if (!vw || !vh) {
+    try { if (frame && typeof frame.close === "function") frame.close(); } catch {}
+    return null;
+  }
 
   const vis = getVisibleSourceRect();
-  if (!vis) return null;
+  if (!vis) {
+    try { if (frame && typeof frame.close === "function") frame.close(); } catch {}
+    return null;
+  }
 
   let sx = Math.floor(vis.offsetX + vis.visibleW * crop.x);
   let sy = Math.floor(vis.offsetY + vis.visibleH * crop.y);
@@ -517,8 +522,11 @@ async function grabNameStripCanvasVariant(crop) {
     const ctx = c.getContext("2d");
     ctx.drawImage(frame, sx, sy, sw, sh, 0, 0, sw, sh);
   } catch (e) {
-    return null;
+    try { if (frame && typeof frame.close === "function") frame.close(); } catch {}
+    throw e;
   }
+
+  try { if (frame && typeof frame.close === "function") frame.close(); } catch {}
   return c;
 }
 
@@ -904,7 +912,7 @@ async function waitForFirstFrame(timeoutMs = 4000) {
 
 
 async function grabFrameBitmap() {
-  // Prefer ImageCapture on iOS Safari to avoid drawImage(video) InvalidStateError.
+  // Prefer ImageCapture when it works.
   if (imageCapture && typeof imageCapture.grabFrame === "function") {
     try {
       return await imageCapture.grabFrame(); // ImageBitmap
@@ -913,14 +921,24 @@ async function grabFrameBitmap() {
     }
   }
 
-  // Fallback: try drawing from <video>
+  // On some iOS Safari builds, drawImage(video, ...) can throw InvalidStateError
+  // even when the preview is live. createImageBitmap(video) is often more reliable.
+  if (typeof createImageBitmap === "function" && video && video.readyState >= 2 && video.videoWidth) {
+    try {
+      return await createImageBitmap(video); // ImageBitmap
+    } catch (e) {
+      // fall through
+    }
+  }
+
+  // Last-resort fallback: draw from <video> onto a canvas.
   if (!video || video.readyState < 2 || !video.videoWidth) return null;
   const c = document.createElement("canvas");
   c.width = video.videoWidth;
   c.height = video.videoHeight;
   try {
     c.getContext("2d").drawImage(video, 0, 0);
-    return c;
+    return c; // canvas
   } catch (e) {
     return null;
   }
