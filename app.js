@@ -25,9 +25,9 @@ async function resetServiceWorkerAndCaches() {
   } catch {}
 }
 
-// Run reset ASAP (normal tabs are often stuck on old SW assets)
+// (Dev convenience) Attempt to unregister any existing Service Worker + clear CacheStorage.
+// This prevents Safari from "holding onto" older builds while you iterate.
 resetServiceWorkerAndCaches();
-
 // ----------------- APP -----------------
 const video = document.getElementById("video");
 const startBtn = document.getElementById("startBtn");
@@ -73,6 +73,7 @@ function resetUI(reason) {
 }
 
 function removeTopBars() {
+  // Hide any legacy "Goat Cam" headers/banners that might exist in older builds.
   try {
     const candidates = Array.from(document.querySelectorAll("header, h1, h2, div, span"));
     for (const el of candidates) {
@@ -83,66 +84,100 @@ function removeTopBars() {
         const h = el.closest("header");
         if (h) h.style.display = "none";
       }
-
+    }
+  } catch {}
+}
 
 function injectPrettyStyles() {
   if (document.getElementById("prettyStyles")) return;
   const style = document.createElement("style");
   style.id = "prettyStyles";
   style.textContent = `
-    :root { --gc-border: rgba(0,0,0,.12); --gc-shadow: 0 10px 25px rgba(0,0,0,.14); }
-    /* Force-clean button style (override any existing CSS) */
+    :root {
+      --gc-border: rgba(0,0,0,.12);
+      --gc-shadow: 0 10px 25px rgba(0,0,0,.14);
+    }
+
+    /* Treat this like an app shell: no page scrolling */
+    html, body {
+      height: 100%;
+      margin: 0 !important;
+      overflow: hidden !important;
+      overscroll-behavior: none !important;
+    }
+    * { box-sizing: border-box; }
+
+    /* Layout hardening */
+    #app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+    #videoWrap { flex: 1 1 auto; min-height: 0; position: relative; background:#000; }
+    #video { width: 100%; height: 100%; object-fit: cover; background:#000; display:block; }
+
+    /* Button + select styling (safe overrides) */
     #startBtn, #toggleScanBtn {
       appearance: none !important;
       -webkit-appearance: none !important;
       border: 1px solid var(--gc-border) !important;
       border-radius: 999px !important;
-      padding: 12px 14px !important;
+      padding: clamp(10px, 1.5vh, 14px) clamp(12px, 2vw, 16px) !important;
       font-weight: 800 !important;
-      font-size: 16px !important;
+      font-size: clamp(14px, 1.9vh, 16px) !important;
       line-height: 1 !important;
       box-shadow: 0 6px 18px rgba(0,0,0,.10) !important;
       background: #ffffff !important;
       color: #111 !important;
-      -webkit-tap-highlight-color: transparent !important;
+      min-height: 44px !important;
     }
-    #startBtn:disabled {
-      opacity: .65 !important;
-      box-shadow: none !important;
-    }
+    #startBtn:disabled { opacity: .65 !important; box-shadow: none !important; }
+
     #scanRate {
       border: 1px solid var(--gc-border) !important;
       border-radius: 999px !important;
-      padding: 10px 12px !important;
+      padding: clamp(9px, 1.3vh, 12px) clamp(10px, 1.6vw, 14px) !important;
       font-weight: 700 !important;
-      font-size: 14px !important;
+      font-size: clamp(13px, 1.7vh, 14px) !important;
       background: #ffffff !important;
       color: #111 !important;
+      min-height: 44px !important;
     }
 
-    /* Fixed bottom tray that always fits on iPhone */
-    #gcTray {
-      position: fixed !important;
-      left: 0 !important;
-      right: 0 !important;
-      bottom: 0 !important;
-      z-index: 9998 !important; /* below overlay canvas (9999) */
-      padding: 10px 12px calc(10px + env(safe-area-inset-bottom)) !important;
-      backdrop-filter: blur(10px) !important;
-      -webkit-backdrop-filter: blur(10px) !important;
-      background: rgba(255,255,255,.90) !important;
-      border-top: 1px solid rgba(0,0,0,.08) !important;
-    }
-    #gcTrayRow {
-      display: flex !important;
+    /* Make the controls area a dense responsive grid (works with your index.html) */
+    #controls {
+      display: grid !important;
+      grid-template-columns: 1fr 1fr !important;
       gap: 10px !important;
       align-items: center !important;
+      padding: 10px !important;
+      max-height: 32dvh !important;
+      overflow: hidden !important;
     }
-    #gcTrayRow > * { flex: 1 1 auto !important; }
-    #gcTrayRow #scanRate { flex: 0.9 1 auto !important; }
+    #controls .chk {
+      grid-column: 1 / -1 !important;
+      display: inline-flex !important;
+      gap: 8px !important;
+      justify-content: center !important;
+      align-items: center !important;
+      flex-wrap: wrap !important;
+      white-space: nowrap !important;
+    }
+    #debug {
+      grid-column: 1 / -1 !important;
+      white-space: nowrap !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+    }
+    @media (min-width: 520px) {
+      #controls { grid-template-columns: 1fr 1fr auto !important; }
+      #controls .chk { grid-column: auto !important; justify-self: end !important; }
+    }
 
-    /* Prevent accidental body padding from causing extra scroll */
-    body { overflow-x: hidden !important; }
+    /* Ensure the video is actually visible and fills its container */
+    #video {
+      display: block !important;
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+      background: #000 !important;
+    }
   `;
   document.head.appendChild(style);
 }
@@ -151,64 +186,32 @@ function beautifyControlsAndFit() {
   try { injectPrettyStyles(); } catch {}
   try { removeTopBars(); } catch {}
 
-  const btnA = document.getElementById("startBtn");
-  const btnB = document.getElementById("toggleScanBtn");
-  const rate = document.getElementById("scanRate");
-  if (!btnA || !btnB || !video) return;
-
-  // Create a fixed tray once, then move controls into it.
-  let tray = document.getElementById("gcTray");
-  let row = document.getElementById("gcTrayRow");
-  if (!tray) {
-    tray = document.createElement("div");
-    tray.id = "gcTray";
-    row = document.createElement("div");
-    row.id = "gcTrayRow";
-    tray.appendChild(row);
-    document.body.appendChild(tray);
-  }
-  if (!row) {
-    row = document.createElement("div");
-    row.id = "gcTrayRow";
-    tray.appendChild(row);
-  }
-
-  // Move controls into tray row (preserve order)
-  const toMove = [btnA, btnB, rate].filter(Boolean);
-  for (const el of toMove) {
+  // On some browsers, layout settles after permission prompt. Nudge a few reflows.
+  const nudge = () => {
     try {
-      if (el && el.parentElement !== row) row.appendChild(el);
-    } catch {}
-  }
+      // Ensure we never keep a stale scroll position.
+      if (document.documentElement.scrollTop || document.body.scrollTop) window.scrollTo(0, 0);
 
-  // Fit video so NO scroll is needed: max-height = viewport - tray height - small margin.
-  const doFit = () => {
-    try {
-      const trayH = tray.getBoundingClientRect().height || 0;
-      const margin = 14;
-      const maxH = Math.max(220, Math.floor(window.innerHeight - trayH - margin));
-      video.style.maxHeight = maxH + "px";
-      video.style.width = "100%";
-      video.style.height = "auto";
-      // If still overflowing, jump back to top
-      if (document.documentElement.scrollHeight - window.innerHeight > 6) {
-        window.scrollTo(0, 0);
-      }
+      // Force guide overlay to re-measure once the video has real dimensions.
+      if (guideCanvas) redrawGuide();
     } catch {}
   };
 
-  doFit();
-  window.addEventListener("resize", doFit);
-  window.addEventListener("orientationchange", () => setTimeout(doFit, 250));
-  setTimeout(doFit, 200);
-  setTimeout(doFit, 600);
+  nudge();
+  window.addEventListener("resize", nudge, { passive: true });
+  window.visualViewport?.addEventListener?.("resize", nudge, { passive: true });
+  window.addEventListener("orientationchange", () => setTimeout(nudge, 250), { passive: true });
+  setTimeout(nudge, 200);
+  setTimeout(nudge, 600);
 }
 
-    }
-  } catch {}
-}
-document.addEventListener("DOMContentLoaded", () => { removeTopBars();
-  try { beautifyControlsAndFit(); } catch (e) {} setTimeout(removeTopBars, 250); try { beautifyControlsAndFit(); } catch (e) {} });
+// Keep behavior stable: clean up banners/tray as soon as DOM exists,
+// and again shortly after in case the page injects/rehydrates elements.
+document.addEventListener("DOMContentLoaded", () => {
+  try { removeTopBars(); } catch {}
+  try { beautifyControlsAndFit(); } catch {}
+  setTimeout(() => { try { removeTopBars(); } catch {} try { beautifyControlsAndFit(); } catch {} }, 250);
+});
 // Data
 async function loadJSON(path) {
   const r = await fetch(path, { cache: "no-store" });
@@ -322,8 +325,6 @@ function redrawGuide() {
 }
 
 // OCR + lookup
-let cameraStream = null;
-let imageCapture = null;
 let workerPromise = null;
 async function getWorker() {
   if (!workerPromise) {
@@ -380,26 +381,9 @@ function levenshtein(a, b) {
   return dp[m][n];
 }
 function similarityScore(ocr, name) {
-  const o = (ocr || "").toLowerCase().replace(/[^a-z0-9'\- ]/g, " ").replace(/\s+/g, " ").trim();
-  const n = (name || "").toLowerCase().replace(/[^a-z0-9'\- ]/g, " ").replace(/\s+/g, " ").trim();
-
-  const dist = levenshtein(o, n);
-  const denom = Math.max(8, Math.max(o.length, n.length));
-  let score = dist / denom;
-
-  // Heuristics to be more forgiving when OCR misses the last word (common on some title bars).
-  // If the OCR string is a substantial substring/prefix of the real name, lower the score.
-  if (o.length >= 10 && (n.startsWith(o) || n.includes(o))) score = Math.min(score, 0.22);
-  if (n.length >= 10 && (o.startsWith(n) || o.includes(n))) score = Math.min(score, 0.22);
-
-  // Token coverage bonus: if OCR tokens are all present in the candidate name, lower score a bit.
-  const ot = o.split(" ").filter(Boolean);
-  if (ot.length >= 2) {
-    const allIn = ot.every(t => n.includes(t));
-    if (allIn) score = Math.min(score, 0.25);
-  }
-
-  return score;
+  const dist = levenshtein(ocr, name);
+  const denom = Math.max(8, Math.max((ocr||"").length, (name||"").length));
+  return dist / denom;
 }
 function pickSearchFragment(ocrText) {
   const cleaned = (ocrText || "").toLowerCase().replace(/[^a-z0-9'\- ]/g, " ").replace(/\s+/g, " ").trim();
@@ -408,61 +392,33 @@ function pickSearchFragment(ocrText) {
   return words[0] || cleaned.slice(0, 10) || cleaned;
 }
 async function resolveCardFromOCR(ocrText) {
-  // Try multiple OCR variants: original, then progressively dropping a trailing fragment/word.
-  const base = cleanOCR(ocrText);
-  const words = base.split(/\s+/).filter(Boolean);
+  const exact = await ygoproLookupExactName(ocrText);
+  if (exact) return { card: exact, exact: true, score: 0, method: "exact" };
 
-  const attempts = [];
-  if (base) attempts.push(base);
+  const frag = pickSearchFragment(ocrText);
+  if (!frag || frag.length < 3) return { card: null, exact: false, score: 1, method: "none" };
 
-  // If last token is short/fragmented (e.g., 'TYPH'), try without it.
-  if (words.length >= 3 && words[words.length - 1].length <= 5) {
-    attempts.push(words.slice(0, -1).join(" "));
+  const candidates = await ygoproLookupFuzzyName(frag);
+  let best = null;
+  for (const c of candidates.slice(0, 200)) {
+    const score = similarityScore(ocrText, c.name);
+    if (!best || score < best.score) best = { card: c, score };
   }
-
-  // Also try just the first 2–3 words (helps when the last word is consistently missed)
-  if (words.length >= 3) attempts.push(words.slice(0, 3).join(" "));
-  if (words.length >= 2) attempts.push(words.slice(0, 2).join(" "));
-
-  // De-dupe attempts
-  const seen = new Set();
-  const uniq = [];
-  for (const a of attempts) {
-    const k = a.toLowerCase();
-    if (!seen.has(k) && a.length >= 6) { seen.add(k); uniq.push(a); }
-  }
-
-  let globalBest = null;
-
-  for (const attempt of uniq) {
-    const exact = await ygoproLookupExactName(attempt);
-    if (exact) return { card: exact, exact: true, score: 0, method: "exact" };
-
-    const frag = pickSearchFragment(attempt);
-    if (!frag || frag.length < 3) continue;
-
-    const candidates = await ygoproLookupFuzzyName(frag);
-    let best = null;
-    for (const c of candidates.slice(0, 200)) {
-      const score = similarityScore(attempt, c.name);
-      if (!best || score < best.score) best = { card: c, score, attempt };
-    }
-
-    if (best && (!globalBest || best.score < globalBest.score)) globalBest = best;
-
-    // Early accept if we get a very strong match on any attempt
-    if (best && best.score <= 0.28) return { card: best.card, exact: false, score: best.score, method: "fuzzy", attempt: best.attempt };
-  }
-
-  if (globalBest && globalBest.score <= 0.35) {
-    return { card: globalBest.card, exact: false, score: globalBest.score, method: "fuzzy", attempt: globalBest.attempt };
-  }
-
-  return { card: null, exact: false, score: globalBest ? globalBest.score : 1, method: globalBest ? "fuzzy-no" : "none" };
+  // strict
+  if (best && best.score <= 0.35) return { card: best.card, exact: false, score: best.score, method: "fuzzy" };
+  return { card: null, exact: false, score: best ? best.score : 1, method: "fuzzy-no" };
 }
 
 // Crop title strip (kept same guide proportions)
 const CROP = { x: 0.07, y: 0.17, w: 0.82, h: 0.11 };
+
+
+function getFallbackCrops() {
+  // Fallback crops that help when the name gets clipped or the title bar sits slightly higher (Spell/Trap).
+  const left = { x: Math.max(0, CROP.x - 0.05), y: CROP.y, w: Math.min(0.95, CROP.w + 0.05), h: CROP.h };
+  const high = { x: CROP.x, y: Math.max(0, CROP.y - 0.04), w: CROP.w, h: Math.max(0.07, CROP.h - 0.02) };
+  return [left, high];
+}
 function getVisibleSourceRect() {
   const vw = video.videoWidth, vh = video.videoHeight;
   const r = video.getBoundingClientRect();
@@ -480,62 +436,30 @@ function getVisibleSourceRect() {
   const offsetY = (vh - visibleH) / 2;
   return { offsetX, offsetY, visibleW, visibleH, vw, vh };
 }
-async function grabNameStripCanvas() {
-  // Default crop (aligned to the guide box)
-  return await grabNameStripCanvasVariant(CROP);
-}
+function grabNameStripCanvas(crop = CROP) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const vis = getVisibleSourceRect();
+  if (!vis) return null;
 
-async function grabNameStripCanvasVariant(crop) {
-  let frame = null;
+  let sx = Math.floor(vis.offsetX + vis.visibleW * crop.x);
+  let sy = Math.floor(vis.offsetY + vis.visibleH * crop.y);
+  let sw = Math.floor(vis.visibleW * crop.w);
+  let sh = Math.floor(vis.visibleH * crop.h);
+
+  sx = Math.max(0, Math.min(vw - 1, sx));
+  sy = Math.max(0, Math.min(vh - 1, sy));
+  sw = Math.max(1, Math.min(vw - sx, sw));
+  sh = Math.max(1, Math.min(vh - sy, sh));
+
+  const c = document.createElement("canvas");
+  c.width = sw; c.height = sh;
   try {
-    frame = await grabFrameBitmap();
-    if (!frame) return null;
-
-    const vw = frame.width, vh = frame.height;
-    if (!vw || !vh) return null;
-
-    const vis = getVisibleSourceRect();
-    if (!vis) return null;
-
-    let sx = Math.floor(vis.offsetX + vis.visibleW * crop.x);
-    let sy = Math.floor(vis.offsetY + vis.visibleH * crop.y);
-    let sw = Math.floor(vis.visibleW * crop.w);
-    let sh = Math.floor(vis.visibleH * crop.h);
-
-    sx = Math.max(0, Math.min(vw - 1, sx));
-    sy = Math.max(0, Math.min(vh - 1, sy));
-    sw = Math.max(1, Math.min(vw - sx, sw));
-    sh = Math.max(1, Math.min(vh - sy, sh));
-
-    const c = document.createElement("canvas");
-    c.width = sw; c.height = sh;
-
-    const ctx = c.getContext("2d");
-    ctx.drawImage(frame, sx, sy, sw, sh, 0, 0, sw, sh);
-    return c;
+    c.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
   } catch (e) {
     return null;
-  } finally {
-    try { if (frame && typeof frame.close === "function") frame.close(); } catch {}
   }
-}
-
-function getFallbackCrops() {
-  // Helps when the title starts near the left edge and we accidentally crop it off.
-  // Also helps Spell/Trap frames where the name bar can sit slightly higher.
-  const left = {
-    x: Math.max(0, CROP.x - 0.05),
-    y: CROP.y,
-    w: Math.min(0.95, CROP.w + 0.05),
-    h: CROP.h
-  };
-  const high = {
-    x: CROP.x,
-    y: Math.max(0, CROP.y - 0.04),
-    w: CROP.w,
-    h: Math.max(0.07, CROP.h - 0.02)
-  };
-  return [left, high];
+  return c;
 }
 function preprocessBW(srcCanvas) {
   const w = srcCanvas.width, h = srcCanvas.height;
@@ -563,157 +487,6 @@ function preprocessBW(srcCanvas) {
   o.putImageData(img, 0, 0);
   return out;
 }
-
-function invertBWCanvas(bwCanvas) {
-  const out = document.createElement("canvas");
-  out.width = bwCanvas.width;
-  out.height = bwCanvas.height;
-  const ctx = out.getContext("2d");
-  ctx.drawImage(bwCanvas, 0, 0);
-  const img = ctx.getImageData(0, 0, out.width, out.height);
-  const d = img.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const v = d[i];
-    const inv = 255 - v;
-    d[i] = d[i + 1] = d[i + 2] = inv;
-    d[i + 3] = 255;
-  }
-  ctx.putImageData(img, 0, 0);
-  return out;
-}
-
-
-function invertCanvas(srcCanvas) {
-  const out = document.createElement("canvas");
-  out.width = srcCanvas.width;
-  out.height = srcCanvas.height;
-  const ctx = out.getContext("2d");
-  ctx.drawImage(srcCanvas, 0, 0);
-  const img = ctx.getImageData(0, 0, out.width, out.height);
-  const d = img.data;
-  for (let i = 0; i < d.length; i += 4) {
-    d[i] = 255 - d[i];
-    d[i + 1] = 255 - d[i + 1];
-    d[i + 2] = 255 - d[i + 2];
-  }
-  ctx.putImageData(img, 0, 0);
-  return out;
-}
-
-function preprocessGrayContrast(srcCanvas) {
-  // Grayscale + contrast stretch (keeps anti-aliased edges; sometimes reads better than hard B/W)
-  const w = srcCanvas.width, h = srcCanvas.height;
-  const scale = 2.4;
-  const out = document.createElement("canvas");
-  out.width = Math.max(1, Math.round(w * scale));
-  out.height = Math.max(1, Math.round(h * scale));
-  const o = out.getContext("2d");
-  o.imageSmoothingEnabled = true;
-  o.drawImage(srcCanvas, 0, 0, out.width, out.height);
-
-  const img = o.getImageData(0, 0, out.width, out.height);
-  const d = img.data;
-
-  // Find min/max gray (ignore extreme outliers lightly)
-  let gMin = 255, gMax = 0;
-  for (let i = 0; i < d.length; i += 4) {
-    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    if (g < gMin) gMin = g;
-    if (g > gMax) gMax = g;
-  }
-  // Prevent divide-by-zero
-  const span = Math.max(1, gMax - gMin);
-  const boost = 255 / span;
-
-  for (let i = 0; i < d.length; i += 4) {
-    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    const ng = Math.max(0, Math.min(255, (g - gMin) * boost));
-    d[i] = d[i + 1] = d[i + 2] = ng;
-    d[i + 3] = 255;
-  }
-  o.putImageData(img, 0, 0);
-  return out;
-}
-
-function preprocessBWOtsu(srcCanvas, invert = false) {
-  // Otsu thresholding often handles light-on-dark title bars better than a single mean-based threshold.
-  const w = srcCanvas.width, h = srcCanvas.height;
-  const scale = 2.4;
-  const out = document.createElement("canvas");
-  out.width = Math.max(1, Math.round(w * scale));
-  out.height = Math.max(1, Math.round(h * scale));
-  const o = out.getContext("2d");
-  o.imageSmoothingEnabled = true;
-  o.drawImage(srcCanvas, 0, 0, out.width, out.height);
-
-  const img = o.getImageData(0, 0, out.width, out.height);
-  const d = img.data;
-
-  // Histogram
-  const hist = new Array(256).fill(0);
-  const n = d.length / 4;
-  for (let i = 0; i < d.length; i += 4) {
-    const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
-    hist[g]++;
-  }
-
-  // Otsu
-  let sum = 0;
-  for (let t = 0; t < 256; t++) sum += t * hist[t];
-
-  let sumB = 0, wB = 0, wF = 0;
-  let varMax = 0, threshold = 128;
-
-  for (let t = 0; t < 256; t++) {
-    wB += hist[t];
-    if (wB === 0) continue;
-    wF = n - wB;
-    if (wF === 0) break;
-
-    sumB += t * hist[t];
-    const mB = sumB / wB;
-    const mF = (sum - sumB) / wF;
-
-    const varBetween = wB * wF * (mB - mF) * (mB - mF);
-    if (varBetween > varMax) {
-      varMax = varBetween;
-      threshold = t;
-    }
-  }
-
-  for (let i = 0; i < d.length; i += 4) {
-    const g = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
-    let v = g > threshold ? 255 : 0;
-    if (invert) v = 255 - v;
-    d[i] = d[i + 1] = d[i + 2] = v;
-    d[i + 3] = 255;
-  }
-  o.putImageData(img, 0, 0);
-  return out;
-}
-
-function grabNameStripCanvasVariant(dy = 0, dh = 0) {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh) return null;
-  const vis = getVisibleSourceRect();
-  if (!vis) return null;
-
-  let sx = Math.floor(vis.offsetX + vis.visibleW * CROP.x);
-  let sy = Math.floor(vis.offsetY + vis.visibleH * (CROP.y + dy));
-  let sw = Math.floor(vis.visibleW * CROP.w);
-  let sh = Math.floor(vis.visibleH * (CROP.h + dh));
-
-  sx = Math.max(0, Math.min(vw - 1, sx));
-  sy = Math.max(0, Math.min(vh - 1, sy));
-  sw = Math.max(1, Math.min(vw - sx, sw));
-  sh = Math.max(1, Math.min(vh - sy, sh));
-
-  const c = document.createElement("canvas");
-  c.width = sw; c.height = sh;
-  c.getContext("2d").drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-  return c;
-}
-
 
 // UI apply + locking
 function applyCardToUI(card, methodText, ocrText) {
@@ -749,51 +522,30 @@ async function scanOnce() {
   if (scanBusy || locked) return;
   scanBusy = true;
 
-  if (!video || video.readyState < 2 || !video.videoWidth) {
-    dbg("Waiting for camera frame…");
-    scanBusy = false;
-    return;
-  }
+  const attempt = async (crop) => {
+    const strip = grabNameStripCanvas(crop);
+    if (!strip) return null;
+    const bw = preprocessBW(strip);
+    const data = await ocrWithWorker(bw);
+    const cleaned = cleanOCR(data.text);
+    if (ocrTextEl) ocrTextEl.textContent = cleaned || "";
+    if (looksTooPartial(cleaned)) return { ok: false, reason: "partial", ocr: cleaned };
 
-  const tryStrip = async (stripCanvas) => {
-    if (!stripCanvas) return null;
+    const resolved = await resolveCardFromOCR(cleaned);
+    if (!resolved.card) return { ok: false, reason: "nomatch", ocr: cleaned, score: resolved.score };
 
-    const bw = preprocessBW(stripCanvas);
-
-    // Pass 1: normal BW
-    const data1 = await ocrWithWorker(bw);
-    const cleaned1 = cleanOCR(data1.text);
-
-    // If too partial, try inverted (white title text / dark bar)
-    let bestText = cleaned1;
-    if (looksTooPartial(bestText) && typeof invertBWCanvas === "function") {
-      const inv = invertBWCanvas(bw);
-      const data2 = await ocrWithWorker(inv);
-      const cleaned2 = cleanOCR(data2.text);
-      bestText = (cleaned2 && cleaned2.length > (bestText || "").length) ? cleaned2 : bestText;
-    }
-
-    if (ocrTextEl) ocrTextEl.textContent = bestText || "";
-
-    if (looksTooPartial(bestText)) return { ok: false, reason: "partial", ocr: bestText };
-
-    const resolved = await resolveCardFromOCR(bestText);
-    if (!resolved.card) return { ok: false, reason: "nomatch", ocr: bestText, score: resolved.score };
-
-    return { ok: true, resolved, ocr: bestText };
+    return { ok: true, resolved, ocr: cleaned };
   };
 
   try {
-    // Primary crop (aligned with the guide box)
-    const primary = await tryStrip(await grabNameStripCanvas());
-    let result = primary;
+    // Primary crop (wider/left to reduce clipping when you center the name)
+    let result = await attempt(CROP);
 
-    // If we got gibberish, try a couple fallback crops (left shift / slightly higher bar)
+    // If no good, try fallbacks (left shift / slightly higher bar)
     if (!result || !result.ok) {
-      for (const crop of getFallbackCrops()) {
-        const r = await tryStrip(await grabNameStripCanvasVariant(crop));
+      for (const fc of getFallbackCrops()) {
+        const r = await attempt(fc);
         if (r && r.ok) { result = r; break; }
-        // If OCR got longer (less gibberish), keep it for display even if not matched.
         if (r && (!result || (r.ocr || "").length > (result.ocr || "").length)) result = r;
       }
     }
@@ -821,21 +573,26 @@ async function scanOnce() {
     dbg("Matching… hold steady");
   } catch (e) {
     try { console.error(e); } catch {}
-    try { dbg("Scan error: " + (e?.message || e)); } catch {}
+    dbg("Scan error: " + (e?.message || e));
   } finally { scanBusy = false; }
 }
 
 function startAutoScanning() {
-  if (scanTimer) clearInterval(scanTimer);
+  if (scanning) return;
   scanning = true;
-  toggleScanBtn.textContent = "Stop Scanning";
-  dbg("Auto-scanning... (locks when stable)");
-
-  scanTimer = setInterval(scanOnce, Number(scanRate.value || 900));
+  const rate = parseInt(scanRateSel?.value, 10) || 900;
+  if (toggleScanBtn) toggleScanBtn.textContent = "Scan New Card";
+  dbg("Auto-scanning… (locks when stable)");
+  scanTimer = setInterval(scanOnce, rate);
+  scanOnce();
+  ensureGuideOverlay();
+  setInterval(() => { if (scanning) redrawGuide(); }, 250);
 }
 
 async function startCamera() {
   dbg("Requesting camera…");
+
+  // Ensure iOS plays inline and doesn't force fullscreen
   try {
     video.setAttribute("playsinline", "");
     video.setAttribute("webkit-playsinline", "");
@@ -844,98 +601,88 @@ async function startCamera() {
     video.autoplay = true;
   } catch {}
 
-  const stream = await navigator.mediaDevices.getUserMedia({
+  const constraints = {
     video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
     audio: false
-  });
+  };
+
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
   video.srcObject = stream;
-  await new Promise(resolve => (video.onloadedmetadata = () => resolve()));
+
+  // Wait for real dimensions (metadata can be racy on iOS)
+  await new Promise((resolve, reject) => {
+    const done = () => {
+      cleanup();
+      resolve();
+    };
+    const fail = () => {
+      cleanup();
+      reject(new Error("Camera metadata timeout"));
+    };
+    const cleanup = () => {
+      clearTimeout(to);
+      video.removeEventListener("loadedmetadata", done);
+      video.removeEventListener("loadeddata", done);
+    };
+
+    // If already ready, resolve immediately
+    if (video.readyState >= 1 && video.videoWidth > 0 && video.videoHeight > 0) return resolve();
+
+    video.addEventListener("loadedmetadata", done, { once: true });
+    video.addEventListener("loadeddata", done, { once: true });
+
+    const to = setTimeout(fail, 3500);
+  });
+
+  // Try to play (retry a couple times)
+  for (let i = 0; i < 3; i++) {
+    try {
+      await video.play();
+      break;
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+
+  // Make sure video always has visible size
   try {
-    await video.play();
-  } catch {
-    await new Promise(r => setTimeout(r, 200));
-    await video.play();
-  }
-  removeTopBars();
-  try { beautifyControlsAndFit(); } catch (e) {}
-  ensureGuideOverlay();
-  redrawGuide();
-  dbg(`Camera OK (${video.videoWidth}x${video.videoHeight}).`);
+    video.style.width = "100%";
+    video.style.height = "100%";
+    video.style.objectFit = "cover";
+    video.style.background = "#000";
+  } catch {}
+
+  try { removeTopBars(); } catch {}
+  try { beautifyControlsAndFit(); } catch {}
+  try { ensureGuideOverlay(); redrawGuide(); } catch {}
+
+  dbg(`Camera OK (${video.videoWidth || "?"}x${video.videoHeight || "?"}).`);
 }
 
-
-
-async function waitForFirstFrame(timeoutMs = 4000) {
-  const start = Date.now();
-  // Try to actually draw a tiny frame from the video. This avoids iOS Safari's
-  // "object is in an invalid state" when frames aren't ready yet.
-  const test = document.createElement("canvas");
-  test.width = 8; test.height = 8;
-  const ctx = test.getContext("2d");
-
-  while (Date.now() - start < timeoutMs) {
-    try {
-      if (video && video.readyState >= 2 && video.videoWidth > 0 && !video.paused) {
-        ctx.drawImage(video, 0, 0, 8, 8);
-        // If drawImage succeeded once, we're good.
-        return true;
-      }
-    } catch (e) {
-      // keep trying
-    }
-
-
-async function grabFrameBitmap() {
-  // Prefer ImageCapture when it works.
-  if (imageCapture && typeof imageCapture.grabFrame === "function") {
-    try {
-      return await imageCapture.grabFrame(); // ImageBitmap
-    } catch (e) {
-      // fall through
-    }
-  }
-
-  // On some iOS Safari builds, drawImage(video, ...) can throw InvalidStateError
-  // even when the preview is live. createImageBitmap(video) is often more reliable.
-  if (typeof createImageBitmap === "function" && video && video.readyState >= 2 && video.videoWidth) {
-    try {
-      return await createImageBitmap(video); // ImageBitmap
-    } catch (e) {
-      // fall through
-    }
-  }
-
-  // Last-resort fallback: draw from <video> onto a canvas.
-  if (!video || video.readyState < 2 || !video.videoWidth) return null;
-  const c = document.createElement("canvas");
-  c.width = video.videoWidth;
-  c.height = video.videoHeight;
-  try {
-    c.getContext("2d").drawImage(video, 0, 0);
-    return c; // canvas
-  } catch (e) {
-    return null;
-  }
-}
-    await new Promise(r => requestAnimationFrame(() => r()));
-  }
-  return false;
-}
 // Controls
 startBtn?.addEventListener("click", async () => {
+  // iOS Safari can be picky: start the camera ASAP (within the tap gesture),
+  // then load JSON in parallel.
   startBtn.disabled = true;
-  startBtn.textContent = "Loading…";
+  startBtn.textContent = "Starting…";
   try {
-    resetUI("Loading data…");
-    setsRelease = await loadJSON("data/sets_release_dates.json");
-    goatBanlist = await loadJSON("data/goat_banlist_2005_04.json");
-    goatPoolCfg = await loadJSON("data/goat_pool_cutoff.json");
+    resetUI("Starting camera…");
+
+    const dataPromise = (async () => {
+      // Load data (no-store) while camera spins up
+      setsRelease = await loadJSON("data/sets_release_dates.json");
+      goatBanlist = await loadJSON("data/goat_banlist_2005_04.json");
+      goatPoolCfg = await loadJSON("data/goat_pool_cutoff.json");
+    })();
 
     await startCamera();
+
+    // Wait for data (if still loading)
+    resetUI("Loading data…");
+    await dataPromise;
+
     startBtn.textContent = "Camera Ready";
     resetUI("Line up card title and hold steady.");
-    const okFrame = await waitForFirstFrame();
-    if (!okFrame) dbg("Camera warming up… try again / reduce motion");
     startAutoScanning();
   } catch (e) {
     console.error(e);
@@ -945,7 +692,6 @@ startBtn?.addEventListener("click", async () => {
     dbg("Failed to start camera.");
   }
 });
-
 toggleScanBtn?.addEventListener("click", async () => {
   locked = null;
   lastCandidate = null;
